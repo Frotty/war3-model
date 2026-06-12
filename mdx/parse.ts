@@ -97,22 +97,32 @@ class State {
         return res;
     }
 
+    // Bulk readers. MDX stores these arrays little-endian, which matches the byte layout of
+    // typed arrays on every platform that runs a browser/Node, so we copy the bytes out with a
+    // single ArrayBuffer.slice() and reinterpret them — far cheaper than N DataView reads.
+    // slice() (rather than a view over `this.ab`) is required because chunk offsets are not
+    // guaranteed to be element-aligned, and the typed-array view constructor throws on a
+    // misaligned byteOffset.
     public float32Array (len: number): Float32Array {
-        const res = new Float32Array(len);
+        const res = new Float32Array(this.ab.slice(this.pos, this.pos + len * 4));
 
-        for (let i = 0; i < len; ++i) {
-            res[i] = this.float32();
-        }
+        this.pos += len * 4;
+
+        return res;
+    }
+
+    public uint16Array (len: number): Uint16Array {
+        const res = new Uint16Array(this.ab.slice(this.pos, this.pos + len * 2));
+
+        this.pos += len * 2;
 
         return res;
     }
 
     public uint8Array (len: number): Uint8Array {
-        const res = new Uint8Array(len);
+        const res = new Uint8Array(this.ab.slice(this.pos, this.pos + len));
 
-        for (let i = 0; i < len; ++i) {
-            res[i] = this.uint8();
-        }
+        this.pos += len;
 
         return res;
     }
@@ -368,17 +378,11 @@ function parseGeosets (model: Model, state: State, size: number) {
 
         state.expectKeyword('VRTX', 'Incorrect geosets format');
         const verticesCount = state.int32();
-        geoset.Vertices = new Float32Array(verticesCount * 3);
-        for (let i = 0; i < verticesCount * 3; ++i) {
-            geoset.Vertices[i] = state.float32();
-        }
+        geoset.Vertices = state.float32Array(verticesCount * 3);
 
         state.expectKeyword('NRMS', 'Incorrect geosets format');
         const normalsCount = state.int32();
-        geoset.Normals = new Float32Array(normalsCount * 3);
-        for (let i = 0; i < normalsCount * 3; ++i) {
-            geoset.Normals[i] = state.float32();
-        }
+        geoset.Normals = state.float32Array(normalsCount * 3);
 
         state.expectKeyword('PTYP', 'Incorrect geosets format');
         const primitiveCount = state.int32();
@@ -396,17 +400,11 @@ function parseGeosets (model: Model, state: State, size: number) {
 
         state.expectKeyword('PVTX', 'Incorrect geosets format');
         const indicesCount = state.int32();
-        geoset.Faces = new Uint16Array(indicesCount);
-        for (let i = 0; i < indicesCount; ++i) {
-            geoset.Faces[i] = state.uint16();
-        }
+        geoset.Faces = state.uint16Array(indicesCount);
 
         state.expectKeyword('GNDX', 'Incorrect geosets format');
         const verticesGroupCount = state.int32();
-        geoset.VertexGroup = new Uint8Array(verticesGroupCount);
-        for (let i = 0; i < verticesGroupCount; ++i) {
-            geoset.VertexGroup[i] = state.uint8();
-        }
+        geoset.VertexGroup = state.uint8Array(verticesGroupCount);
 
         state.expectKeyword('MTGC', 'Incorrect geosets format');
         const groupsCount = state.int32();
@@ -485,10 +483,7 @@ function parseGeosets (model: Model, state: State, size: number) {
             state.expectKeyword('UVBS', 'Incorrect geosets format');
             const textureCoordsCount = state.int32();
 
-            const tvertices = new Float32Array(textureCoordsCount * 2);
-            for (let j = 0; j < textureCoordsCount * 2; ++j) {
-                tvertices[j] = state.float32();
-            }
+            const tvertices = state.float32Array(textureCoordsCount * 2);
 
             geoset.TVertices.push(tvertices);
         }
