@@ -189,7 +189,8 @@ fn fresnelSchlickRoughness(lightFactor: f32, f0: vec3f, roughness: f32) -> vec3f
     if (!isFront) {
         normal = -normal;
     }
-    normal = normalize(TBN * -normal);
+    // X/Y account for WC3's normal-map convention. Keep Z outward-facing.
+    normal = normalize(TBN * normal);
 
     let viewDir: vec3f = normalize(fsUniforms.cameraPos - in.fragPos);
     let reflected = reflect(-viewDir, normal);
@@ -272,7 +273,9 @@ fn fresnelSchlickRoughness(lightFactor: f32, f0: vec3f, roughness: f32) -> vec3f
         let ambient: vec3f = (kD * diffuse + specular) * occlusion;
         color = ambient + totalLight;
     } else {
-        var ambient: vec3f = vec3(.03);
+        // WC3 normally supplies environment lighting. Keep the no-environment fallback readable
+        // instead of reducing occluded Reforged materials to near-black silhouettes.
+        var ambient: vec3f = vec3(.18);
         ambient *= baseColor.rgb * occlusion;
         color = ambient + totalLight;
     }

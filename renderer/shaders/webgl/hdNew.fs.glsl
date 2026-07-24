@@ -100,7 +100,9 @@ void main(void) {
     if (!gl_FrontFacing) {
         normal = -normal;
     }
-    normal = normalize(vTBN * -normal);
+    // X/Y account for WC3's normal-map convention. Do not negate Z as well: that turns
+    // outward-facing normals inward and removes all direct light as soon as the map loads.
+    normal = normalize(vTBN * normal);
 
     vec3 viewDir = normalize(uCameraPos - vFragPos);
     vec3 reflected = reflect(-viewDir, normal);
@@ -182,7 +184,9 @@ void main(void) {
         vec3 ambient = (kD * diffuse + specular) * occlusion;
         color = ambient + totalLight;
     } else {
-        vec3 ambient = vec3(.03);
+        // WC3 normally supplies environment lighting. Keep the no-environment fallback readable
+        // instead of reducing occluded Reforged materials to near-black silhouettes.
+        vec3 ambient = vec3(.18);
         ambient *= baseColor.rgb * occlusion;
         color = ambient + totalLight;
     }

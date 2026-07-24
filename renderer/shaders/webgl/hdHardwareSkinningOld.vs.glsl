@@ -18,7 +18,7 @@ varying vec3 vFragPos;
 
 void main(void) {
     vec4 position = vec4(aVertexPosition, 1.0);
-    mat4 sum;
+    mat4 sum = mat4(0.0);
 
     // sum += uNodesMatrices[int(aSkin[0])] * 1.;
     sum += uNodesMatrices[int(aSkin[0])] * aBoneWeight[0];

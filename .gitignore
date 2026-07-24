@@ -6,3 +6,5 @@ node_modules
 *.d.ts
 !third_party/decoder.js
 !eslint.config.js
+/_build
+*.mdx

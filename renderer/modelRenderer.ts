@@ -214,6 +214,7 @@ const GPU_LAYER_PROPS: [string, GPUBlendState, GPUDepthStencilState][] = [['none
 
 export class ModelRenderer {
     private isHD: boolean;
+    private environmentMapProcessingEnabled = true;
 
     private canvas: HTMLCanvasElement;
     private gl: WebGL2RenderingContext | WebGLRenderingContext;
@@ -540,6 +541,20 @@ export class ModelRenderer {
         console.log('[war3-model]', ...args);
     }
 
+    private debugGLErrorOnce (key: string, message: string, detail: Record<string, unknown>): void {
+        if (!this.isDebugLoggingEnabled() || !this.gl) {
+            return;
+        }
+        const error = this.gl.getError();
+        if (error === this.gl.NO_ERROR) {
+            return;
+        }
+        this.debugLogOnce(key, message, {
+            ...detail,
+            glError: `0x${error.toString(16)}`
+        });
+    }
+
     public destroy (): void {
         if (this.particlesController) {
             this.particlesController.destroy();
@@ -649,6 +664,24 @@ export class ModelRenderer {
 
             this.gl.deleteBuffer(this.cubeVertexBuffer);
             this.gl.deleteBuffer(this.squareVertexBuffer);
+            this.gl.deleteBuffer(this.skeletonVertexBuffer);
+            this.gl.deleteBuffer(this.skeletonColorBuffer);
+            for (const buffer of [
+                ...this.vertexBuffer,
+                ...this.normalBuffer,
+                ...this.texCoordBuffer,
+                ...this.indexBuffer,
+                ...this.wireframeIndexBuffer,
+                ...this.groupBuffer,
+                ...this.skinWeightBuffer,
+                ...this.tangentBuffer,
+            ]) {
+                this.gl.deleteBuffer(buffer);
+            }
+            this.gl.deleteTexture(this.brdfLUT);
+            for (const texture of Object.values(this.rendererData.envTextures)) this.gl.deleteTexture(texture);
+            for (const texture of Object.values(this.rendererData.irradianceMap)) this.gl.deleteTexture(texture);
+            for (const texture of Object.values(this.rendererData.prefilteredEnvMap)) this.gl.deleteTexture(texture);
 
             if (this.useVAO) {
                 const gl2 = this.gl as WebGL2RenderingContext;
@@ -692,9 +725,11 @@ export class ModelRenderer {
 
         this.initShaders();
         this.initBuffers();
-        this.initCube();
-        this.initSquare();
-        this.initBRDFLUT();
+        if (this.environmentMapProcessingEnabled) {
+            this.initCube();
+            this.initSquare();
+            this.initBRDFLUT();
+        }
         this.particlesController.initGL(glContext);
         this.ribbonsController.initGL(glContext);
     }
@@ -840,7 +875,37 @@ export class ModelRenderer {
         }
     }
 
+    /**
+     * Reuse a texture already uploaded on the same WebGL context. This is primarily used by
+     * sequential thumbnail renderers: model geometry remains renderer-local, while shared WC3
+     * textures avoid repeated decode and texImage2D uploads.
+     */
+    public adoptTexture (path: string, texture: WebGLTexture, hasMipmaps = false): boolean {
+        if (!this.gl || !texture) {
+            return false;
+        }
+        this.rendererData.textures[path] = texture;
+        this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
+        const flags = this.model.Textures.find(it => it.Image === path)?.Flags || 0;
+        this.setTextureParameters(flags, hasMipmaps);
+        this.gl.bindTexture(this.gl.TEXTURE_2D, null);
+        return true;
+    }
+
+    public getTexture (path: string): WebGLTexture | undefined {
+        return this.rendererData.textures[path];
+    }
+
     public setTextureCompressedImage (path: string, format: DDS_FORMAT, imageData: ArrayBuffer, ddsInfo: DdsInfo): void {
+        this.debugLogOnce(`texture-compressed:${path}`, 'Uploading compressed texture', {
+            path,
+            format,
+            width: ddsInfo.images[0]?.shape.width,
+            height: ddsInfo.images[0]?.shape.height,
+            mipLevels: ddsInfo.images.length,
+            bytes: imageData.byteLength,
+        });
+
         this.rendererData.textures[path] = this.gl.createTexture();
         this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[path]);
 
@@ -873,6 +938,14 @@ export class ModelRenderer {
         this.processEnvMaps(path);
 
         this.gl.bindTexture(this.gl.TEXTURE_2D, null);
+        this.debugGLErrorOnce(`texture-compressed-gl:${path}`, 'Compressed texture upload GL error', {
+            path,
+            format,
+            width: ddsInfo.images[0]?.shape.width,
+            height: ddsInfo.images[0]?.shape.height,
+            mipLevels: count,
+            bytes: imageData.byteLength,
+        });
     }
 
     public setGPUTextureCompressedImage (path: string, format: GPUTextureFormat, imageData: ArrayBuffer, ddsInfo: DdsInfo): void {
@@ -918,6 +991,10 @@ export class ModelRenderer {
 
     public setLightColor (lightColor: vec3): void {
         vec3.copy(this.rendererData.lightColor, lightColor);
+    }
+
+    public setEnvironmentMapProcessingEnabled (enabled: boolean): void {
+        this.environmentMapProcessingEnabled = enabled;
     }
 
     public setSequence (index: number): void {
@@ -1525,6 +1602,12 @@ export class ModelRenderer {
                     this.gl.UNSIGNED_SHORT,
                     0
                 );
+                this.debugGLErrorOnce(`hd-draw-gl:${i}:${materialID}`, 'HD drawElements GL error', {
+                    geosetId: i,
+                    materialID,
+                    faces: geoset.Faces.length,
+                    isHD: this.isHD,
+                });
 
                 if (shadowMapTexture && shadowMapMatrix) {
                     this.gl.activeTexture(this.gl.TEXTURE3);
@@ -1585,6 +1668,15 @@ export class ModelRenderer {
                         this.gl.UNSIGNED_SHORT,
                         0
                     );
+                    this.debugGLErrorOnce(`sd-draw-gl:${i}:${j}:${materialID}`, 'SD drawElements GL error', {
+                        geosetId: i,
+                        materialID,
+                        layerIndex: j,
+                        textureID,
+                        texturePath: texture?.Image || null,
+                        faces: geoset.Faces.length,
+                        isHD: this.isHD,
+                    });
                 }
             }
         }
@@ -2014,6 +2106,7 @@ export class ModelRenderer {
 
     private processEnvMaps (path: string): void {
         if (
+            !this.environmentMapProcessingEnabled ||
             !this.rendererData.requiredEnvMaps[path] ||
             !(this.rendererData.textures[path] || this.rendererData.gpuTextures[path]) ||
             !(isWebGL2(this.gl) || this.device) ||
@@ -2585,7 +2678,8 @@ export class ModelRenderer {
         };
     }
 
-    private destroyShaderProgramObject<A extends string, U extends string>(object: WebGLProgramObject<A, U>): void {
+    private destroyShaderProgramObject<A extends string, U extends string>(object?: WebGLProgramObject<A, U>): void {
+        if (!object) return;
         if (object.program) {
             if (object.vertexShader) {
                 this.gl.detachShader(object.program, object.vertexShader);
@@ -2687,7 +2781,7 @@ export class ModelRenderer {
             ];
         }
 
-        if (this.isHD && isWebGL2(this.gl)) {
+        if (this.environmentMapProcessingEnabled && this.isHD && isWebGL2(this.gl)) {
             this.envToCubemap = this.initShaderProgram(envToCubemapVertexShader, envToCubemapFragmentShader, {
                 aPos: 'aPos'
             }, {
@@ -4060,7 +4154,17 @@ export class ModelRenderer {
 
         if (texture.Image) {
             this.gl.activeTexture(this.gl.TEXTURE0);
-            this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image]);
+            const glTexture = this.rendererData.textures[texture.Image];
+            if (!glTexture) {
+                this.debugLogOnce(`sd-missing-bind:${materialID}:${layerIndex}:${texture.Image}`, 'Missing SD texture at bind', {
+                    materialID,
+                    layerIndex,
+                    textureID,
+                    texturePath: texture.Image,
+                    loadedTextureCount: Object.keys(this.rendererData.textures).length,
+                });
+            }
+            this.gl.bindTexture(this.gl.TEXTURE_2D, glTexture);
             this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
             this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, 0);
         } else if (texture.ReplaceableId === 1 || texture.ReplaceableId === 2) {
@@ -4069,7 +4173,18 @@ export class ModelRenderer {
         }
 
         this.gl.activeTexture(this.gl.TEXTURE1);
-        this.gl.bindTexture(this.gl.TEXTURE_2D, maskTexture?.Image ? this.rendererData.textures[maskTexture.Image] : null);
+        const glMaskTexture = maskTexture?.Image ? this.rendererData.textures[maskTexture.Image] : null;
+        if (maskTexture?.Image && !glMaskTexture) {
+            this.debugLogOnce(`sd-missing-mask-bind:${materialID}:${layerIndex}:${maskTexture.Image}`, 'Missing SD mask texture at bind', {
+                materialID,
+                layerIndex,
+                maskTextureID,
+                texturePath: texture.Image || null,
+                maskTexturePath: maskTexture.Image,
+                loadedTextureCount: Object.keys(this.rendererData.textures).length,
+            });
+        }
+        this.gl.bindTexture(this.gl.TEXTURE_2D, glMaskTexture);
         this.gl.uniform1i(this.shaderProgramLocations.maskSamplerUniform, 1);
         this.gl.uniform1f(this.shaderProgramLocations.useReplaceableMaskUniform, maskTexture ? 1 : 0);
         this.gl.uniform1f(this.shaderProgramLocations.layerAlphaUniform, this.getLayerAlpha(layer));
@@ -4149,7 +4264,16 @@ export class ModelRenderer {
         }
 
         this.gl.activeTexture(this.gl.TEXTURE0);
-        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[diffuseTexture.Image]);
+        const glDiffuseTexture = this.rendererData.textures[diffuseTexture.Image];
+        if (!glDiffuseTexture) {
+            this.debugLogOnce(`hd-missing-diffuse-bind:${materialID}:${diffuseTexture.Image}`, 'Missing HD diffuse texture at bind', {
+                materialID,
+                diffuseTextureID,
+                diffuseTexturePath: diffuseTexture.Image,
+                loadedTextureCount: Object.keys(this.rendererData.textures).length,
+            });
+        }
+        this.gl.bindTexture(this.gl.TEXTURE_2D, glDiffuseTexture);
         this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
 
         if (baseLayer.Shading & LayerShading.NoDepthTest) {
@@ -4183,11 +4307,29 @@ export class ModelRenderer {
         }
 
         this.gl.activeTexture(this.gl.TEXTURE1);
-        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[normalTexture.Image]);
+        const glNormalTexture = this.rendererData.textures[normalTexture.Image];
+        if (!glNormalTexture) {
+            this.debugLogOnce(`hd-missing-normal-bind:${materialID}:${normalTexture.Image}`, 'Missing HD normal texture at bind', {
+                materialID,
+                normalTextureID,
+                normalTexturePath: normalTexture.Image,
+                loadedTextureCount: Object.keys(this.rendererData.textures).length,
+            });
+        }
+        this.gl.bindTexture(this.gl.TEXTURE_2D, glNormalTexture);
         this.gl.uniform1i(this.shaderProgramLocations.normalSamplerUniform, 1);
 
         this.gl.activeTexture(this.gl.TEXTURE2);
-        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[ormTexture.Image]);
+        const glOrmTexture = this.rendererData.textures[ormTexture.Image];
+        if (!glOrmTexture) {
+            this.debugLogOnce(`hd-missing-orm-bind:${materialID}:${ormTexture.Image}`, 'Missing HD ORM texture at bind', {
+                materialID,
+                ormTextureID,
+                ormTexturePath: ormTexture.Image,
+                loadedTextureCount: Object.keys(this.rendererData.textures).length,
+            });
+        }
+        this.gl.bindTexture(this.gl.TEXTURE_2D, glOrmTexture);
         this.gl.uniform1i(this.shaderProgramLocations.ormSamplerUniform, 2);
 
         this.gl.uniform3fv(this.shaderProgramLocations.replaceableColorUniform, this.rendererData.teamColor);
