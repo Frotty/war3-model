@@ -99,6 +99,11 @@ function cacheFor<K extends object, V> (store: WeakMap<K, Map<string, V>>, key: 
     return map;
 }
 
+// Textures this renderer uploaded with a full mip chain. adoptTexture consults it so a texture
+// shared between renderers keeps its mipmapped filtering instead of silently dropping to LINEAR
+// in whichever renderer adopts it second.
+const mipmappedTextures = /*#__PURE__*/ new WeakSet<WebGLTexture>();
+
 function mipLevelCount (width: number, height: number): number {
     return Math.floor(Math.log2(Math.max(width, height))) + 1;
 }
@@ -906,7 +911,7 @@ export class ModelRenderer {
             // this.gl.pixelStorei(this.gl.UNPACK_FLIP_Y_WEBGL, true);
             this.gl.texImage2D(this.gl.TEXTURE_2D, 0, this.gl.RGBA, this.gl.RGBA, this.gl.UNSIGNED_BYTE, img);
             const flags = this.model.Textures.find(it => it.Image === path)?.Flags || 0;
-            this.setTextureParameters(flags, true);
+            this.setTextureParameters(flags, true, this.rendererData.textures[path]);
 
             this.gl.generateMipmap(this.gl.TEXTURE_2D);
 
@@ -1027,7 +1032,7 @@ export class ModelRenderer {
                 hasMipmaps = false;
             }
             const flags = this.model.Textures.find(it => it.Image === path)?.Flags || 0;
-            this.setTextureParameters(flags, hasMipmaps);
+            this.setTextureParameters(flags, hasMipmaps, this.rendererData.textures[path]);
             this.processEnvMaps(path);
 
             this.gl.bindTexture(this.gl.TEXTURE_2D, null);
@@ -1039,14 +1044,16 @@ export class ModelRenderer {
      * sequential thumbnail renderers: model geometry remains renderer-local, while shared WC3
      * textures avoid repeated decode and texImage2D uploads.
      */
-    public adoptTexture (path: string, texture: WebGLTexture, hasMipmaps = false): boolean {
+    public adoptTexture (path: string, texture: WebGLTexture, hasMipmaps?: boolean): boolean {
         if (!this.gl || !texture) {
             return false;
         }
         this.rendererData.textures[path] = texture;
         this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
         const flags = this.model.Textures.find(it => it.Image === path)?.Flags || 0;
-        this.setTextureParameters(flags, hasMipmaps);
+        // Wrap modes are per-model so they always have to be reapplied, but the mip chain belongs
+        // to the texture. Default to what it was actually uploaded with rather than assuming none.
+        this.setTextureParameters(flags, hasMipmaps ?? mipmappedTextures.has(texture), texture);
         this.gl.bindTexture(this.gl.TEXTURE_2D, null);
         return true;
     }
@@ -1093,7 +1100,7 @@ export class ModelRenderer {
         }
 
         const flags = this.model.Textures.find(it => it.Image === path)?.Flags || 0;
-        this.setTextureParameters(flags, isWebGL2(this.gl));
+        this.setTextureParameters(flags, isWebGL2(this.gl), this.rendererData.textures[path]);
         this.processEnvMaps(path);
 
         this.gl.bindTexture(this.gl.TEXTURE_2D, null);
@@ -2294,7 +2301,11 @@ export class ModelRenderer {
         this.gl.bufferData(this.gl.ARRAY_BUFFER, buffer, this.gl.DYNAMIC_DRAW);
     }
 
-    private setTextureParameters (flags: TextureFlags | 0, hasMipmaps: boolean) {
+    private setTextureParameters (flags: TextureFlags | 0, hasMipmaps: boolean, texture?: WebGLTexture) {
+        if (hasMipmaps && texture) {
+            mipmappedTextures.add(texture);
+        }
+
         if (flags & TextureFlags.WrapWidth) {
             this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.REPEAT);
         } else {
