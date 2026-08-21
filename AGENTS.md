@@ -31,92 +31,85 @@ and imports **exactly one renderer**: `ModelRenderer`.
 
 ## Performance: making parse + render fast enough for inline rendering
 
-CASC extraction and BLP decode are already fast and cached, so the remaining cost is in (A) MDX
-parsing and (B) the WebGL2 render/update loop. Findings below are ordered by expected payoff.
-File/line references point at the current code so the work is unambiguous.
+Everything below has been implemented. The reference model for anything Reforged is
+`arthas.mdx` at the repository root: v1200, 7.91 MB, 464,007 keyframes, 36 geosets across four
+LOD levels, 24 DDS textures plus `ReplaceableTextures/EnvironmentMap.blp`.
 
-> **Status:** items A1, B3, B4 and B5 below are **implemented** (see the ✅ notes). They are
-> validated by typecheck, lint, and a 12-model parse + round-trip test (geometry byte-identical
-> after `generateMDX` → `parseMDX`). The render-loop changes (B3–B5) are WebGL2-gated and need an
-> in-browser smoke test against an SD and an HD model before release. A2 and C remain open.
+Verified by `npm run typecheck`, `npm run lint` and `npm test`. The test suite covers the
+AnimVector round trip, the BLP decoder against an independent per-pixel reference, and the
+animation output of every model in the repo (`ModelRenderer.update()` runs without a GL context,
+so the whole interpolator is exercised headlessly). The GL-only changes still want an in-browser
+smoke test against an SD model, an HD model, and a wireframe toggle.
 
-### A. MDX parsing ([mdx/parse.ts](mdx/parse.ts))
+### What the numbers were
 
-1. **Bulk geometry arrays are read element-by-element through `DataView`.**
-   `float32Array`, `int32Array`, `uint16Array`, `uint8Array` ([parse.ts:100](mdx/parse.ts#L100)) loop
-   N times calling `getFloat32`/`getInt32` per element. For large geosets (vertices, normals,
-   tangents, UVs, faces) this is the dominant parse cost.
-   - **Fix:** for these bulk reads, build a typed-array view over a copied slice:
-     `new Float32Array(this.ab.slice(pos, pos + len * 4))` (one `memcpy` + zero-cost view) instead
-     of N `DataView` calls. MDX is little-endian and JS engines are little-endian, so the bytes map
-     directly. Use `.slice()` (not `new Float32Array(ab, pos, len)`) because chunk offsets are **not
-     guaranteed 4-byte aligned** — the direct view constructor throws on a misaligned `pos`.
-   - Keep `DataView` for scalar header fields; only the large arrays benefit.
-   - ✅ **Done:** `State.float32Array` / `uint8Array` / new `uint16Array` now slice-and-view
-     ([parse.ts:100](mdx/parse.ts#L100)); geoset Vertices/Normals/Faces/VertexGroup/TVertices and the
-     HD Tangents/SkinWeights reads go through them.
+Measured on Node 22.17.1 / V8. GPU sample counts are counted from the shader sources, not timed.
 
-2. **Parse is fully synchronous and blocks the webview thread.** For inline rendering of many models,
-   move `parseMDX` into a Web Worker (it only needs the `ArrayBuffer`, which is transferable) so the
-   UI thread stays responsive and several models can parse in parallel.
+| | before | after |
+| --- | --- | --- |
+| `parseMDX(arthas.mdx)` | 32.2 ms | 6.6 ms |
+| `update()` × 600 frames, arthas | 20.2 ms | 16.5 ms |
+| BLP1 Direct 1024², all mips | 8.50 ms | 2.90 ms |
+| BLP1 Direct 1024², level 0 | 5.94 ms | 1.86 ms |
+| alpha histogram per 1024² texture | 1.70 ms | 0 (debug only) |
+| env cubemap allocation | 256 MB | 3.1 MB |
+| IBL precompute | ~230M fetches per model | once per context |
 
-### B. WebGL2 render/update loop ([renderer/modelRenderer.ts](renderer/modelRenderer.ts))
+### Where the work went
 
-3. **Bone matrices are uploaded with up to 254 individual `uniformMatrix4fv` calls per frame.**
-   The SD/HD hardware-skinning path loops `j = 0 … MAX_NODES (254)` and issues one
-   `gl.uniformMatrix4fv` per node every frame ([modelRenderer.ts:1384](renderer/modelRenderer.ts#L1384)),
-   using the `uNodesMatrices[i]` uniform-array locations resolved at init
-   ([modelRenderer.ts:2627](renderer/modelRenderer.ts#L2627)).
-   - **Fix:** a UBO is the textbook answer, but the SD shaders are GLSL ES 1.00 (WebGL1-compatible)
-     and UBOs would force `#version 300 es`, breaking the WebGL1 fallback. Instead, pack all node
-     matrices into one contiguous `Float32Array` (indexed by ObjectId, matching the shader's bone
-     indices) and upload the whole `uNodesMatrices[]` array with a **single `uniformMatrix4fv`** call
-     against the `[0]` location — WebGL fills consecutive array elements from one buffer. Same
-     ~254→1 collapse, no shader change, both WebGL1 and WebGL2 keep working.
-   - ✅ **Done:** packed buffer `nodesMatricesBuffer` + single upload
-     ([modelRenderer.ts:1391](renderer/modelRenderer.ts#L1391)); init now resolves only the `[0]`
-     uniform location instead of 254.
+**A. Parsing.** Bulk geometry arrays read through `ArrayBuffer.slice()` + a typed-array view
+rather than N `DataView` calls. `AnimVector` now stores keyframes in flat arrays — `Frames`,
+`Values`, `InTans`, `OutTans`, `VectorSize` — instead of one object plus one small typed array
+per keyframe; `AnimVector.Keys` is a lazy accessor materialising views over that storage, so the
+generators and `docs/optframes` keep working and the renderer never pays for the objects.
+Assigning `Keys` rebuilds the flat storage. The accessor lives on a prototype, not per instance:
+`Object.defineProperty` per object drops each one into dictionary mode and costs more per frame
+than the lazy materialisation saves.
 
-4. **Vertex attributes are re-bound and re-pointed on every draw call, every frame.**
-   Both the HD branch ([modelRenderer.ts:1452](renderer/modelRenderer.ts#L1452)) and the SD per-layer
-   loop ([modelRenderer.ts:1512](renderer/modelRenderer.ts#L1512)) call `bindBuffer` +
-   `vertexAttribPointer` for position/normal/uv/group(/skin/weight/tangent) on each draw. In the SD
-   path this repeats for *every material layer* of the geoset even though the geometry is identical.
-   - **Fix:** use **WebGL2 Vertex Array Objects (VAOs)**. Record one VAO per geoset at load time
-     (`initBuffers`), then `bindVertexArray` once per geoset in `render`. This removes dozens of
-     redundant GL calls per geoset per frame and the per-layer re-binding entirely.
-   - ✅ **Done (WebGL2 only):** `createGeosetVAO` records attribute layout in `initBuffers`; `render`
-     binds the VAO per geoset and the old per-draw `bindBuffer`/`vertexAttribPointer` is gated behind
-     `!this.useVAO`. The element buffer is still bound explicitly per draw so wireframe toggling
-     works; VAOs are deleted in `destroy`. WebGL1 keeps the original path.
+**B. Render loop.** Node matrices upload in a single `uniformMatrix4fv`. WebGL2 VAOs record
+per-geoset attribute layout once. Static layer texture ids resolve at load; only keyframed ones
+re-interpolate per frame. Per-material reflection-layer and replaceable-mask lookups resolve at
+load too (`initMaterialLookups`), except for materials with keyframed texture ids, which still
+resolve live. Light/camera/shadow uniforms and the BRDF LUT bind hoisted out of the geoset loop.
+Blend, depth and cull state is shadowed and only re-issued on change (`applyLayerState`), reset
+once per frame. Debug logging resolves its flag once in the constructor and every hot-path call
+site guards on it, so keys and payload objects are never built.
 
-5. **`update()` re-evaluates every material layer's texture id every frame.**
-   The loop at [modelRenderer.ts:948](renderer/modelRenderer.ts#L948) walks all materials × layers
-   each frame; for the common case where `TextureID` is a plain `number` (static), it just re-copies
-   the constant.
-   - **Fix:** at load, precompute which layers actually have animated (`AnimVector`) texture/normal/
-     ORM/reflection ids and only re-interp those per frame; copy static ids once.
-   - ✅ **Done:** `initLayerTextureAnimations` resolves static ids once and records only keyframed
-     entries in `animatedLayerTextures`; `update` now iterates just that list
-     ([modelRenderer.ts](renderer/modelRenderer.ts)).
+**C. Textures.** The alpha histogram in `setTextureImageData` is behind the debug flag. The
+palettized BLP decoder writes one 32-bit store per pixel through a palette LUT. Mip levels are
+allocated with `texStorage2D` and filled with `texSubImage2D` from the raw view; a caller passing
+only level 0 gets the rest from `generateMipmap`. Anisotropy defaults to 4 (`setMaxAnisotropy`)
+and the driver maximum is queried once per context, not once per texture. Geoset buffers and VAOs
+upload lazily on first draw, so LOD levels that never render never upload.
 
-### C. Startup cost for inline / thumbnail use
+**D. Environment maps.** `ENV_MAP_SIZE` is 256, not 2048 — the intermediate cubemap only feeds a
+32² irradiance map and a 128² prefiltered map, and nothing else samples it except the optional
+skybox. Irradiance and prefiltered cubemaps are cached per context by texture path
+(`sharedEnvMaps`), as is the BRDF LUT (`sharedBrdfLUT`), because none of them depend on the
+model; `destroy()` leaves them alone and `ModelRenderer.releaseSharedResources(gl)` frees them.
+The diffuse convolution samples at `sampleDelta = 0.05`; the prefilter takes 256 importance
+samples with a PDF-derived `textureLod` mip instead of 1024 at level 0. The prefilter target is
+no longer hand-zeroed after `texStorage2D` already allocated it.
 
-6. **A fresh `ModelRenderer` + `initGL` recompiles the full shader set per model.**
-   `initGL` ([modelRenderer.ts:659](renderer/modelRenderer.ts#L659)) compiles the SD/HD programs and,
-   for HD models, also the env-cubemap, convolution, prefilter and BRDF-LUT programs plus an eager
-   BRDF-LUT render ([modelRenderer.ts:676](renderer/modelRenderer.ts#L676)). The extension currently
-   creates a brand-new renderer and context per loaded model
-   ([mdxViewer.ts:476](../wurst4vscode/src/webview/mdxViewer.ts#L476)).
-   - **Fix for inline rendering:** share **one** WebGL2 context and a renderer/program pool across
-     thumbnails rather than one context per model (browsers also cap the number of live WebGL
-     contexts). Shader programs are model-independent and can be compiled once and reused.
-   - **Lazy-compile** the env/prefilter/BRDF programs: they are only needed when `render` is called
-     with `env`/`useEnvironmentMap`. Inline thumbnails that don't use IBL should not pay for them.
-   - For static thumbnails, render a **single frame on demand** instead of running a continuous
-     `requestAnimationFrame` loop per preview.
+**E. Missing textures.** `initFallbackTextures` binds 1×1 white / flat-normal / default-ORM
+stand-ins wherever a model texture has not loaded. Without them the sampler is left unbound,
+WebGL returns `(0, 0, 0, 1)`, and HD models render as a black silhouette until every texture
+arrives.
 
-### Suggested order of work
-1 → 3 → 4 give the largest wins (parse bulk-read, bone UBO, VAOs). 6 matters specifically once many
-models are rendered inline simultaneously. 2 and 5 are incremental. Profile with a heavy HD Reforged
-model (many bones + multi-layer materials), which stresses every item above.
+**F. Shader compilation.** `getShader` no longer queries `COMPILE_STATUS` straight after
+`compileShader`, which forced a synchronous driver stall per shader; `checkProgram` validates
+after linking and reports whichever stage failed. Particle and ribbon controllers skip compiling
+and drawing entirely when the model has no emitters.
+
+### Still open
+
+- **Decode in a worker.** `blp/decode.ts` and `third_party/decoder.js` are pure
+  `ArrayBuffer` → `ArrayBuffer` and have no DOM dependency, so they can move off the UI thread.
+- **One context, one program set.** The extension still builds a fresh WebGL2 context and
+  recompiles the full shader set per model. The env-map and BRDF caches above are already keyed
+  by context and pay off the moment a context is shared; programs vary only by
+  SD / HD / software-skinning, so a three-entry cache covers everything.
+- **Do not micro-optimise `third_party/decoder.js`.** Measured: replacing the 8×8 de-block copy
+  with `set()`/`subarray()` is three times *slower* (4.56 ms → 13.97 ms), and hoisting the scale
+  multiply out of the resample loop changes nothing (3.30 ms → 3.29 ms). Win by calling it fewer
+  times, not by rewriting it.

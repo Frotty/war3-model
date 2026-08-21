@@ -64,7 +64,142 @@ export interface AnimKeyframe {
 export interface AnimVector {
     LineType: LineType;
     GlobalSeqId?: number;
+    /**
+     * Keyframes as objects, in frame order.
+     *
+     * Materialised from the flat arrays below on first access and cached from then on; the
+     * `Vector`, `InTan` and `OutTan` of each keyframe are views into those arrays, so writing
+     * through them updates the vector. Assigning a new array replaces the flat arrays.
+     *
+     * The renderer reads the flat arrays directly and never touches this, which is the point: a
+     * Reforged hero carries around half a million keyframes, and building an object and a
+     * separate typed array for each of them dominated parse time.
+     */
     Keys: AnimKeyframe[];
+    /** Keyframe times. Its length is the keyframe count. */
+    Frames: Int32Array;
+    /** Keyframe vectors, `VectorSize` components each, laid out end to end. */
+    Values: Float32Array|Int32Array;
+    /** In/out tangents, same layout as `Values`. Only present for Hermite and Bezier. */
+    InTans?: Float32Array|Int32Array;
+    OutTans?: Float32Array|Int32Array;
+    /** Components per keyframe: 1, 3 or 4. */
+    VectorSize: number;
+}
+
+function allocateLike (source: Float32Array|Int32Array, length: number): Float32Array|Int32Array {
+    return source instanceof Int32Array ? new Int32Array(length) : new Float32Array(length);
+}
+
+/**
+ * Backing implementation for AnimVector.
+ *
+ * `Keys` is a prototype accessor rather than a per-object one: every AnimVector then shares a
+ * single hidden class, which keeps the flat-array reads in the interpolator monomorphic.
+ * Defining the accessor per instance instead drops each object into dictionary mode and costs
+ * more per frame than the lazy materialisation saves.
+ */
+class AnimVectorImpl implements AnimVector {
+    public LineType: LineType;
+    public GlobalSeqId: number;
+    public VectorSize: number;
+    public Frames: Int32Array;
+    public Values: Float32Array|Int32Array;
+    public InTans?: Float32Array|Int32Array;
+    public OutTans?: Float32Array|Int32Array;
+
+    private keysCache: AnimKeyframe[] = null;
+
+    constructor (
+        lineType: LineType,
+        globalSeqId: number,
+        vectorSize: number,
+        frames: Int32Array,
+        values: Float32Array|Int32Array,
+        inTans?: Float32Array|Int32Array,
+        outTans?: Float32Array|Int32Array
+    ) {
+        this.LineType = lineType;
+        this.GlobalSeqId = globalSeqId;
+        this.VectorSize = vectorSize;
+        this.Frames = frames;
+        this.Values = values;
+        this.InTans = inTans;
+        this.OutTans = outTans;
+    }
+
+    public get Keys (): AnimKeyframe[] {
+        if (!this.keysCache) {
+            const size = this.VectorSize;
+            const keys: AnimKeyframe[] = new Array(this.Frames.length);
+
+            for (let i = 0; i < keys.length; ++i) {
+                const keyframe: AnimKeyframe = {
+                    Frame: this.Frames[i],
+                    Vector: this.Values.subarray(i * size, (i + 1) * size)
+                };
+
+                if (this.InTans) {
+                    keyframe.InTan = this.InTans.subarray(i * size, (i + 1) * size);
+                    keyframe.OutTan = this.OutTans.subarray(i * size, (i + 1) * size);
+                }
+
+                keys[i] = keyframe;
+            }
+
+            this.keysCache = keys;
+        }
+
+        return this.keysCache;
+    }
+
+    public set Keys (value: AnimKeyframe[]) {
+        const size = this.VectorSize;
+        const hasTans = value.length > 0 ? Boolean(value[0].InTan) : Boolean(this.InTans);
+
+        const frames = new Int32Array(value.length);
+        const values = allocateLike(this.Values, value.length * size);
+        const inTans = hasTans ? allocateLike(this.Values, value.length * size) : undefined;
+        const outTans = hasTans ? allocateLike(this.Values, value.length * size) : undefined;
+
+        for (let i = 0; i < value.length; ++i) {
+            frames[i] = value[i].Frame;
+            values.set(value[i].Vector, i * size);
+            if (hasTans) {
+                inTans.set(value[i].InTan, i * size);
+                outTans.set(value[i].OutTan, i * size);
+            }
+        }
+
+        this.Frames = frames;
+        this.Values = values;
+        this.InTans = inTans;
+        this.OutTans = outTans;
+        // The incoming keyframes point at the caller's arrays, not the storage just built, so
+        // they have to be rebuilt as views on next read.
+        this.keysCache = null;
+    }
+}
+
+/**
+ * Build an AnimVector over flat keyframe storage. `values`, `inTans` and `outTans` hold
+ * `vectorSize` components per keyframe, laid out end to end and in the same order as `frames`.
+ */
+export function createAnimVector (
+    lineType: LineType,
+    globalSeqId: number,
+    vectorSize: number,
+    frames: Int32Array,
+    values: Float32Array|Int32Array,
+    inTans?: Float32Array|Int32Array,
+    outTans?: Float32Array|Int32Array
+): AnimVector {
+    return new AnimVectorImpl(lineType, globalSeqId, vectorSize, frames, values, inTans, outTans);
+}
+
+/** Replace an AnimVector's keyframes, rebuilding its flat storage to match. */
+export function setAnimVectorKeys (animVector: AnimVector, value: AnimKeyframe[]): void {
+    animVector.Keys = value;
 }
 
 export enum LayerShading {

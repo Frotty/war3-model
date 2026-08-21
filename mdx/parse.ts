@@ -1,7 +1,8 @@
 import {
-    Model, Sequence, Material, Layer, AnimVector, AnimKeyframe, LineType, Texture, Geoset,
+    Model, Sequence, Material, Layer, AnimVector, LineType, Texture, Geoset,
     GeosetAnimInfo, GeosetAnim, Node, Bone, Helper, Attachment, EventObject, CollisionShape, CollisionShapeType,
-    ParticleEmitter2, ParticleEmitter2FramesFlags, Camera, Light, TVertexAnim, RibbonEmitter, ParticleEmitter, FaceFX, BindPose, ParticleEmitterPopcorn
+    ParticleEmitter2, ParticleEmitter2FramesFlags, Camera, Light, TVertexAnim, RibbonEmitter, ParticleEmitter, FaceFX, BindPose, ParticleEmitterPopcorn,
+    createAnimVector
 } from '../model';
 import { LAYER_TEXTURE_ID_MAP } from '../renderer/util';
 
@@ -147,58 +148,48 @@ class State {
         return res;
     }
 
+    // Keyframes go straight into flat arrays: one Int32Array of frame times and one typed array
+    // of vector components, rather than an object plus its own small typed array per keyframe.
+    // A Reforged hero holds ~464k keyframes, so that was close to a million allocations per
+    // parse, and it left the interpolator chasing pointers through scattered objects every frame.
     public animVector (type: AnimVectorType): AnimVector {
-        const res: AnimVector = {
-            Keys: []
-        } as AnimVector;
-
         const isInt = type === AnimVectorType.INT1;
-
         const vectorSize = animVectorSize[type];
 
         const keysCount = this.int32();
-        res.LineType = this.int32();
-        res.GlobalSeqId = this.int32();
+        const lineType: LineType = this.int32();
+        let globalSeqId = this.int32();
 
-        if (res.GlobalSeqId === NONE) {
-            res.GlobalSeqId = null;
+        if (globalSeqId === NONE) {
+            globalSeqId = null;
         }
+
+        const hasTangents = lineType === LineType.Hermite || lineType === LineType.Bezier;
+
+        const frames = new Int32Array(keysCount);
+        const values = isInt ? new Int32Array(keysCount * vectorSize) : new Float32Array(keysCount * vectorSize);
+        const inTans = hasTangents ? (isInt ? new Int32Array(keysCount * vectorSize) : new Float32Array(keysCount * vectorSize)) : undefined;
+        const outTans = hasTangents ? (isInt ? new Int32Array(keysCount * vectorSize) : new Float32Array(keysCount * vectorSize)) : undefined;
 
         for (let i = 0; i < keysCount; ++i) {
-            const animKeyFrame: AnimKeyframe = {} as AnimKeyframe;
+            frames[i] = this.int32();
 
-            animKeyFrame.Frame = this.int32();
-
-            if (isInt) {
-                animKeyFrame.Vector = new Int32Array(vectorSize);
-            } else {
-                animKeyFrame.Vector = new Float32Array(vectorSize);
-            }
+            const base = i * vectorSize;
             for (let j = 0; j < vectorSize; ++j) {
-                if (isInt) {
-                    animKeyFrame.Vector[j] = this.int32();
-                } else {
-                    animKeyFrame.Vector[j] = this.float32();
-                }
+                values[base + j] = isInt ? this.int32() : this.float32();
             }
 
-            if (res.LineType === LineType.Hermite || res.LineType === LineType.Bezier) {
-                for (const part of ['InTan', 'OutTan']) {
-                    animKeyFrame[part] = new Float32Array(vectorSize);
-                    for (let j = 0; j < vectorSize; ++j) {
-                        if (isInt) {
-                            animKeyFrame[part][j] = this.int32();
-                        } else {
-                            animKeyFrame[part][j] = this.float32();
-                        }
-                    }
+            if (hasTangents) {
+                for (let j = 0; j < vectorSize; ++j) {
+                    inTans[base + j] = isInt ? this.int32() : this.float32();
+                }
+                for (let j = 0; j < vectorSize; ++j) {
+                    outTans[base + j] = isInt ? this.int32() : this.float32();
                 }
             }
-
-            res.Keys.push(animKeyFrame);
         }
 
-        return res;
+        return createAnimVector(lineType, globalSeqId, vectorSize, frames, values, inTans, outTans);
     }
 }
 

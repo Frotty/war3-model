@@ -5,7 +5,7 @@ import {
 import {vec3, vec4} from 'gl-matrix';
 import {ModelInterp} from './modelInterp';
 import {mat4} from 'gl-matrix';
-import {degToRad, rand, getShader} from './util';
+import {degToRad, rand, getShader, checkProgram} from './util';
 import {RendererData} from './rendererData';
 import {lerp} from './interp';
 import vertexShader from './shaders/webgl/particles.vs.glsl?raw';
@@ -226,11 +226,23 @@ export class ParticlesController {
     public initGL (glContext: WebGLRenderingContext): void {
         this.gl = glContext;
 
+        // A model with no emitters has nothing to draw, so skip compiling and linking the
+        // program entirely — that is two blocking getShaderParameter stalls per model saved
+        // on every doodad, building and static prop.
+        if (!this.emitters.length) {
+            return;
+        }
+
         this.initShaders();
     }
 
     public initGPUDevice (device: GPUDevice): void {
         this.device = device;
+
+        // Same reasoning as initGL: no emitters, no pipelines.
+        if (!this.emitters.length) {
+            return;
+        }
 
         this.gpuShaderModule = device.createShaderModule({
             label: 'particles shader module',
@@ -436,9 +448,7 @@ export class ParticlesController {
         this.gl.attachShader(shaderProgram, fragment);
         this.gl.linkProgram(shaderProgram);
 
-        if (!this.gl.getProgramParameter(shaderProgram, this.gl.LINK_STATUS)) {
-            alert('Could not initialise shaders');
-        }
+        checkProgram(this.gl, shaderProgram, [vertex, fragment]);
 
         this.gl.useProgram(shaderProgram);
 
@@ -588,6 +598,10 @@ export class ParticlesController {
     }
 
     public render (mvMatrix: mat4, pMatrix: mat4): void {
+        if (!this.emitters.length) {
+            return;
+        }
+
         this.gl.disable(this.gl.CULL_FACE);
         this.gl.useProgram(this.shaderProgram);
 
@@ -641,6 +655,10 @@ export class ParticlesController {
     }
 
     public renderGPU (pass: GPURenderPassEncoder, mvMatrix: mat4, pMatrix: mat4): void {
+        if (!this.emitters.length) {
+            return;
+        }
+
         const VSUniformsValues = new ArrayBuffer(128);
         const VSUniformsViews = {
             mvMatrix: new Float32Array(VSUniformsValues, 0, 16),
@@ -734,12 +752,19 @@ export class ParticlesController {
 
         if (visibility > 0) {
             if (emitter.props.Squirt && typeof emitter.props.EmissionRate !== 'number') {
-                const interp = this.interp.findKeyframes(emitter.props.EmissionRate);
+                const emissionRate = emitter.props.EmissionRate;
+                const interp = this.interp.findKeyframes(emissionRate);
 
-                if (interp && interp.left && interp.left.Frame !== emitter.squirtFrame) {
-                    emitter.squirtFrame = interp.left.Frame;
-                    if (interp.left.Vector[0] > 0) {
-                        emitter.emission += interp.left.Vector[0] * 1000;
+                if (interp) {
+                    const leftFrame = emissionRate.Frames[interp.left];
+
+                    if (leftFrame !== emitter.squirtFrame) {
+                        emitter.squirtFrame = leftFrame;
+
+                        const value = emissionRate.Values[interp.left * emissionRate.VectorSize];
+                        if (value > 0) {
+                            emitter.emission += value * 1000;
+                        }
                     }
                 }
             } else {

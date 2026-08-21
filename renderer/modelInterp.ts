@@ -1,5 +1,5 @@
-import {AnimKeyframe, AnimVector} from '../model';
-import {findKeyframes, interpNum, interpVec3, interpQuat} from './interp';
+import {AnimVector} from '../model';
+import {findKeyframes, interpNum, interpVec3, interpQuat, KeyframeRange} from './interp';
 import {vec3, quat} from 'gl-matrix';
 import {RendererData} from './rendererData';
 
@@ -15,11 +15,12 @@ export class ModelInterp {
             return vector;
         }
 
-        let max = vector.Keys[0].Vector[0];
+        const {Values: values, VectorSize: size} = vector;
+        let max = values[0];
 
-        for (let i = 1; i < vector.Keys.length; ++i) {
-            if (vector.Keys[i].Vector[0] > max) {
-                max = vector.Keys[i].Vector[0];
+        for (let i = 1; i < vector.Frames.length; ++i) {
+            if (values[i * size] > max) {
+                max = values[i * size];
             }
         }
 
@@ -37,7 +38,7 @@ export class ModelInterp {
         if (!res) {
             return null;
         }
-        return interpNum(res.frame, res.left, res.right, animVector.LineType);
+        return interpNum(animVector, res.frame, res.left, res.right);
     }
 
     public vec3 (out: vec3, animVector: AnimVector): vec3|null {
@@ -45,7 +46,7 @@ export class ModelInterp {
         if (!res) {
             return null;
         }
-        return interpVec3(out, res.frame, res.left, res.right, animVector.LineType);
+        return interpVec3(out, animVector, res.frame, res.left, res.right);
     }
 
     public quat (out: quat, animVector: AnimVector): quat|null {
@@ -53,7 +54,7 @@ export class ModelInterp {
         if (!res) {
             return null;
         }
-        return interpQuat(out, res.frame, res.left, res.right, animVector.LineType);
+        return interpQuat(out, animVector, res.frame, res.left, res.right);
     }
 
     public animVectorVal (vector: AnimVector|number, defaultVal: number): number {
@@ -71,7 +72,7 @@ export class ModelInterp {
         return res;
     }
 
-    public findKeyframes (animVector: AnimVector): null | {frame: number, left: AnimKeyframe, right: AnimKeyframe} {
+    public findKeyframes (animVector: AnimVector): KeyframeRange|null {
         if (!animVector) {
             return null;
         }

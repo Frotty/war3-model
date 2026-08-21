@@ -3,7 +3,8 @@ import {
     CollisionShape, ParticleEmitter2, Camera, MaterialRenderMode, FilterMode, LayerShading, TextureFlags,
     GeosetAnimFlags, NodeFlags, CollisionShapeType, ParticleEmitter2Flags, ParticleEmitter2FramesFlags, Light,
     LightType, TVertexAnim, RibbonEmitter, ParticleEmitter2FilterMode, ParticleEmitter, ParticleEmitterFlags, NodeType,
-    EventObject, Sequence, ModelInfo, Geoset, GeosetAnimInfo, FaceFX, BindPose, ParticleEmitterPopcorn, ParticleEmitterPopcornFlags
+    EventObject, Sequence, ModelInfo, Geoset, GeosetAnimInfo, FaceFX, BindPose, ParticleEmitterPopcorn, ParticleEmitterPopcornFlags,
+    createAnimVector, setAnimVectorKeys
 } from '../model';
 import { LAYER_TEXTURE_NAME_MAP } from '../renderer/util';
 
@@ -360,11 +361,13 @@ function parseAnimKeyframe (state: State, frame: number, type: AnimVectorType, l
 }
 
 function parseAnimVector (state: State, type: AnimVectorType): AnimVector {
-    const animVector: AnimVector = {
-        LineType: LineType.DontInterp,
-        GlobalSeqId: null,
-        Keys: []
-    };
+    const vectorSize = animVectorSize[type];
+    // MDL is text, so the keyframe count is not known reliably up front (the declared count is
+    // not trusted). Collect into a plain array and hand it to setAnimVectorKeys, which builds the
+    // flat storage the renderer reads.
+    const keys: AnimKeyframe[] = [];
+    let lineTypeValue = LineType.DontInterp;
+    let globalSeqId: number = null;
 
     parseNumber(state); // count, not used
 
@@ -372,7 +375,7 @@ function parseAnimVector (state: State, type: AnimVectorType): AnimVector {
 
     const lineType: string = parseKeyword(state);
     if (lineType === 'DontInterp' || lineType === 'Linear' || lineType === 'Hermite' || lineType === 'Bezier') {
-        animVector.LineType = LineType[lineType];
+        lineTypeValue = LineType[lineType];
     }
 
     strictParseSymbol(state, ',');
@@ -381,7 +384,7 @@ function parseAnimVector (state: State, type: AnimVectorType): AnimVector {
         const keyword = parseKeyword(state);
 
         if (keyword === 'GlobalSeqId') {
-            animVector[keyword] = parseNumber(state);
+            globalSeqId = parseNumber(state);
             strictParseSymbol(state, ',');
         } else {
             const frame = parseNumber(state);
@@ -392,11 +395,16 @@ function parseAnimVector (state: State, type: AnimVectorType): AnimVector {
 
             strictParseSymbol(state, ':');
 
-            animVector.Keys.push(parseAnimKeyframe(state, frame, type, animVector.LineType));
+            keys.push(parseAnimKeyframe(state, frame, type, lineTypeValue));
         }
     }
 
     strictParseSymbol(state, '}');
+
+    const empty = type === AnimVectorType.INT1 ? new Int32Array(0) : new Float32Array(0);
+    const animVector = createAnimVector(lineTypeValue, globalSeqId, vectorSize,
+        new Int32Array(0), empty);
+    setAnimVectorKeys(animVector, keys);
 
     return animVector;
 }
