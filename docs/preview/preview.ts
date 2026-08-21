@@ -801,18 +801,22 @@ function initDragDrop() {
                                 dds
                             );
                         } else {
+                            // Software BC decode fallback, only reached when the compressed
+                            // texture extensions are missing. Same as the BLP path: decode the
+                            // top level and let the GPU build the chain.
                             const uint8 = new Uint8Array(array);
-                            const datas: ImageData[] = dds.images
-                                .filter(image => image.shape.width > 0 && image.shape.height > 0)
-                                .map(image => {
-                                    const src = uint8.slice(image.offset, image.offset + image.length);
-                                    const rgba = decodeDds(src, dds.format, image.shape.width, image.shape.height);
-                                    return new ImageData(new Uint8ClampedArray(rgba), image.shape.width, image.shape.height);
-                                });
+                            const image = dds.images.find(it => it.shape.width > 0 && it.shape.height > 0);
+
+                            if (!image) {
+                                throw new Error(`${file.name}: no decodable DDS mip level`);
+                            }
+
+                            const src = uint8.slice(image.offset, image.offset + image.length);
+                            const rgba = decodeDds(src, dds.format, image.shape.width, image.shape.height);
 
                             modelRenderer.setTextureImageData(
                                 textureName,
-                                datas
+                                [new ImageData(new Uint8ClampedArray(rgba), image.shape.width, image.shape.height)]
                             );
                         }
 
@@ -822,9 +826,13 @@ function initDragDrop() {
 
                         console.log(file.name, blp);
 
+                        // Level 0 only: setTextureImageData allocates the full chain and has the
+                        // GPU generate the rest. Decoding all 11 levels in JS cost a third again
+                        // as much for a result no thumbnail can tell apart, and on JPEG-content
+                        // BLPs it re-parsed the Huffman tables once per level.
                         modelRenderer.setTextureImageData(
                             textureName,
-                            blp.mipmaps.map((_mipmap, i) => getImageData(blp, i))
+                            [getImageData(blp, 0)]
                         );
                         resolve();
                     } else {

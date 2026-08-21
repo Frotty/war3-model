@@ -16,6 +16,11 @@ function readModel(fileName) {
 }
 
 function run(name, fn) {
+    // .mdx files are gitignored, so a fresh clone has no fixtures. Skip rather than fail.
+    if (!fs.existsSync(path.join(repoRoot, 'BHolyWings.mdx'))) {
+        console.log(`skip - ${name} (BHolyWings.mdx not present)`);
+        return;
+    }
     fn();
     console.log(`ok - ${name}`);
 }

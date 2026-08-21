@@ -63,18 +63,39 @@ export function degToRad (angle: number): number {
     return angle * Math.PI / 180;
 }
 
+/**
+ * Compile without asking whether it worked. Querying COMPILE_STATUS immediately after
+ * compileShader forces a synchronous stall on the driver, which serialises what the
+ * implementation would otherwise compile in the background; with the HD model plus the
+ * environment chain that was sixteen stalls per model. Callers submit every shader, link every
+ * program, and only then check with checkProgram().
+ */
 export function getShader (gl: WebGLRenderingContext, source: string, type: number): WebGLShader {
     const shader: WebGLShader = gl.createShader(type);
 
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
 
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-        alert(gl.getShaderInfoLog(shader));
-        return null;
+    return shader;
+}
+
+/**
+ * Validate a linked program, reporting whichever stage actually failed. Call this after linking,
+ * never between compileShader and linkProgram.
+ */
+export function checkProgram (gl: WebGLRenderingContext, program: WebGLProgram, shaders: WebGLShader[]): boolean {
+    if (gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        return true;
     }
 
-    return shader;
+    for (const shader of shaders) {
+        if (shader && !gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            console.error('[war3-model] shader compile failed:', gl.getShaderInfoLog(shader));
+        }
+    }
+    console.error('[war3-model] program link failed:', gl.getProgramInfoLog(program));
+
+    return false;
 }
 
 export function isWebGL2 (gl: WebGLRenderingContext | WebGL2RenderingContext): gl is WebGL2RenderingContext {

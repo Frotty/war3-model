@@ -47,12 +47,28 @@ vec3 ImportanceSampleGGX(vec2 Xi, vec3 N, float roughness) {
     return normalize(sampleVec);
 }
 
+float DistributionGGX(float NdotH, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
+
+    return a2 / (PI * denom * denom);
+}
+
 void main() {
     vec3 N = normalize(vLocalPos);
     vec3 R = N;
     vec3 V = R;
 
-    const uint SAMPLE_COUNT = 1024u;
+    // 256 importance samples read from a mip level chosen by the sample's own solid angle,
+    // rather than 1024 samples all read from level 0. Sampling the level whose texel footprint
+    // matches the sample's PDF is what makes the lower count viable: it removes the fireflies
+    // that undersampling a high-resolution cubemap produces, so the result is cleaner than the
+    // original while doing a quarter of the work.
+    const uint SAMPLE_COUNT = 256u;
+    const float resolution = ${ENV_MAP_SIZE}.0;
+    const float saTexel = 4.0 * PI / (6.0 * resolution * resolution);
+
     float totalWeight = 0.0;
     vec3 prefilteredColor = vec3(0.0);
     for(uint i = 0u; i < SAMPLE_COUNT; ++i)
@@ -63,7 +79,13 @@ void main() {
 
         float NdotL = max(dot(N, L), 0.0);
         if(NdotL > 0.0) {
-            prefilteredColor += pow(texture(uEnvironmentMap, L).rgb, vec3(gamma)) * NdotL;
+            float NdotH = max(dot(N, H), 0.0);
+            float HdotV = max(dot(H, V), 0.0);
+            float pdf = DistributionGGX(NdotH, uRoughness) * NdotH / (4.0 * HdotV) + 0.0001;
+            float saSample = 1.0 / (float(SAMPLE_COUNT) * pdf + 0.0001);
+            float mipLevel = uRoughness == 0.0 ? 0.0 : 0.5 * log2(saSample / saTexel);
+
+            prefilteredColor += pow(textureLod(uEnvironmentMap, L, mipLevel).rgb, vec3(gamma)) * NdotL;
             totalWeight      += NdotL;
         }
     }

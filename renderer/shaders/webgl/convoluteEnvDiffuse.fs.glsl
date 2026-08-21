@@ -17,7 +17,10 @@ void main(void) {
     vec3 right = normalize(cross(up, normal));
     up         = normalize(cross(normal, right));
 
-    const float sampleDelta = 0.025;
+    // 0.05 gives 126 x 32 = 4032 samples per fragment against 0.025's 252 x 63 = 15876.
+    // The target is a 32^2 irradiance cubemap of a hemisphere integral, which cannot
+    // resolve the difference; the sample count was simply four times higher than needed.
+    const float sampleDelta = 0.05;
     float nrSamples = 0.0;
     for(float phi = 0.0; phi < 2.0 * PI; phi += sampleDelta)
     {

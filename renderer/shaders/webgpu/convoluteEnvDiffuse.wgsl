@@ -1,6 +1,8 @@
 const PI: f32 = 3.14159265359;
 const gamma: f32 = 2.2;
-const sampleDelta: f32 = 0.025;
+// See the WebGL convoluteEnvDiffuse shader: 4032 samples per fragment instead of 15876,
+// which a 32^2 irradiance target cannot tell apart.
+const sampleDelta: f32 = 0.05;
 
 struct VSUniforms {
     mvMatrix: mat4x4f,

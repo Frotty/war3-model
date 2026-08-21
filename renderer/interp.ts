@@ -1,11 +1,29 @@
-import {LineType, AnimKeyframe, AnimVector} from '../model';
+import {LineType, AnimVector} from '../model';
 import {vec3, quat} from 'gl-matrix';
 
-const findKeyframesRes = {
+/**
+ * A pair of keyframe indices into an AnimVector's flat arrays, plus the frame to interpolate at.
+ * Indices rather than keyframe objects: the objects only exist if something asks for
+ * `AnimVector.Keys`, and the renderer never does.
+ */
+export interface KeyframeRange {
+    frame: number;
+    left: number;
+    right: number;
+}
+
+const findKeyframesRes: KeyframeRange = {
     frame: 0,
-    left: null,
-    right: null
+    left: 0,
+    right: 0
 };
+
+// Scratch for pulling one keyframe's components out of the flat arrays. gl-matrix only reads
+// indices 0..3 of its inputs, so four slots covers every vector size in the format.
+const leftVector = new Float32Array(4);
+const rightVector = new Float32Array(4);
+const leftOutTan = new Float32Array(4);
+const rightInTan = new Float32Array(4);
 
 export function lerp (left: number, right: number, t: number): number {
     return left * (1 - t) + right * t;
@@ -33,29 +51,38 @@ function hermite (left: number, outTan: number, inTan: number, right: number, t:
     return left * factor1 + outTan * factor2 + inTan * factor3 + right * factor4;
 }
 
-export function findKeyframes (animVector: AnimVector, frame: number, from: number, to: number):
-        null | {frame: number, left: AnimKeyframe, right: AnimKeyframe} {
+function copyInto (out: Float32Array, source: Float32Array|Int32Array, index: number, size: number): Float32Array {
+    const base = index * size;
+
+    for (let i = 0; i < size; ++i) {
+        out[i] = source[base + i];
+    }
+
+    return out;
+}
+
+export function findKeyframes (animVector: AnimVector, frame: number, from: number, to: number): KeyframeRange|null {
     if (!animVector) {
         return null;
     }
 
-    const array = animVector.Keys;
+    const frames = animVector.Frames;
     let first = 0;
-    let count = array.length;
+    let count = frames.length;
 
     if (count === 0) {
         return null;
     }
 
-    if (array[0].Frame > to) {
+    if (frames[0] > to) {
         return null;
-    } else if (array[count - 1].Frame < from) {
+    } else if (frames[count - 1] < from) {
         return null;
     }
 
     while (count > 0) {
         const step = count >> 1;
-        if (array[first + step].Frame <= frame) {
+        if (frames[first + step] <= frame) {
             first = first + step + 1;
             count -= step + 1;
         } else {
@@ -63,22 +90,22 @@ export function findKeyframes (animVector: AnimVector, frame: number, from: numb
         }
     }
 
-    if (first === array.length || array[first].Frame > to) {
-        if (first > 0 && array[first - 1].Frame >= from) {
+    if (first === frames.length || frames[first] > to) {
+        if (first > 0 && frames[first - 1] >= from) {
             findKeyframesRes.frame = frame;
-            findKeyframesRes.left = array[first - 1];
-            findKeyframesRes.right = array[first - 1];
+            findKeyframesRes.left = first - 1;
+            findKeyframesRes.right = first - 1;
 
             return findKeyframesRes;
         } else {
             return null;
         }
     }
-    if (first === 0 || array[first - 1].Frame < from) {
-        if (array[first].Frame <= to) {
+    if (first === 0 || frames[first - 1] < from) {
+        if (frames[first] <= to) {
             findKeyframesRes.frame = frame;
-            findKeyframesRes.left = array[first];
-            findKeyframesRes.right = array[first];
+            findKeyframesRes.left = first;
+            findKeyframesRes.right = first;
 
             return findKeyframesRes;
         } else {
@@ -87,64 +114,87 @@ export function findKeyframes (animVector: AnimVector, frame: number, from: numb
     }
 
     findKeyframesRes.frame = frame;
-    findKeyframesRes.left = array[first - 1];
-    findKeyframesRes.right = array[first];
+    findKeyframesRes.left = first - 1;
+    findKeyframesRes.right = first;
 
     return findKeyframesRes;
 }
 
-export function interpNum (frame: number, left: AnimKeyframe, right: AnimKeyframe, lineType: LineType): number|null {
-    if (left.Frame === right.Frame) {
-        return left.Vector[0];
+export function interpNum (animVector: AnimVector, frame: number, left: number, right: number): number {
+    const frames = animVector.Frames;
+    const values = animVector.Values;
+    const size = animVector.VectorSize;
+    const leftBase = left * size;
+    const rightBase = right * size;
+
+    if (frames[left] === frames[right]) {
+        return values[leftBase];
     }
 
-    const t = (frame - left.Frame) / (right.Frame - left.Frame);
+    const t = (frame - frames[left]) / (frames[right] - frames[left]);
 
-    if (lineType === LineType.DontInterp) {
-        return left.Vector[0];
-    } else if (lineType === LineType.Bezier) {
-        return bezier(left.Vector[0], left.OutTan[0], right.InTan[0], right.Vector[0], t);
-    } else if (lineType === LineType.Hermite) {
-        return hermite(left.Vector[0], left.OutTan[0], right.InTan[0], right.Vector[0], t);
+    if (animVector.LineType === LineType.DontInterp) {
+        return values[leftBase];
+    } else if (animVector.LineType === LineType.Bezier) {
+        return bezier(values[leftBase], animVector.OutTans[leftBase], animVector.InTans[rightBase], values[rightBase], t);
+    } else if (animVector.LineType === LineType.Hermite) {
+        return hermite(values[leftBase], animVector.OutTans[leftBase], animVector.InTans[rightBase], values[rightBase], t);
     } else {
         // Linear
-        return lerp(left.Vector[0], right.Vector[0], t);
+        return lerp(values[leftBase], values[rightBase], t);
     }
 }
 
-export function interpVec3 (out: vec3, frame: number, left: AnimKeyframe, right: AnimKeyframe,
-                            lineType: LineType): vec3 {
-    if (left.Frame === right.Frame) {
-        return left.Vector as vec3;
+export function interpVec3 (out: vec3, animVector: AnimVector, frame: number, left: number, right: number): vec3 {
+    const frames = animVector.Frames;
+    const values = animVector.Values;
+    const size = animVector.VectorSize;
+
+    // Always writes through `out`. Callers hold several results at once — updateNode keeps
+    // translation, rotation and scaling live together — so returning a shared scratch buffer
+    // would alias them.
+    if (frames[left] === frames[right] || animVector.LineType === LineType.DontInterp) {
+        return copyInto(out as Float32Array, values, left, size) as unknown as vec3;
     }
 
-    const t = (frame - left.Frame) / (right.Frame - left.Frame);
+    const a = copyInto(leftVector, values, left, size);
+    const b = copyInto(rightVector, values, right, size);
+    const t = (frame - frames[left]) / (frames[right] - frames[left]);
 
-    if (lineType === LineType.DontInterp) {
-        return left.Vector as vec3;
-    } else if (lineType === LineType.Bezier) {
-        return vec3.bezier(out, left.Vector as vec3, left.OutTan as vec3, right.InTan as vec3, right.Vector as vec3, t);
-    } else if (lineType === LineType.Hermite) {
-        return vec3.hermite(out, left.Vector as vec3, left.OutTan as vec3,
-            right.InTan as vec3, right.Vector as vec3, t);
+    if (animVector.LineType === LineType.Bezier) {
+        return vec3.bezier(out, a as unknown as vec3,
+            copyInto(leftOutTan, animVector.OutTans, left, size) as unknown as vec3,
+            copyInto(rightInTan, animVector.InTans, right, size) as unknown as vec3,
+            b as unknown as vec3, t);
+    } else if (animVector.LineType === LineType.Hermite) {
+        return vec3.hermite(out, a as unknown as vec3,
+            copyInto(leftOutTan, animVector.OutTans, left, size) as unknown as vec3,
+            copyInto(rightInTan, animVector.InTans, right, size) as unknown as vec3,
+            b as unknown as vec3, t);
     } else {
-        return vec3.lerp(out, left.Vector as vec3, right.Vector as vec3, t);
+        return vec3.lerp(out, a as unknown as vec3, b as unknown as vec3, t);
     }
 }
 
-export function interpQuat (out: quat, frame: number, left: AnimKeyframe, right: AnimKeyframe,
-                            lineType: LineType): quat {
-    if (left.Frame === right.Frame) {
-        return left.Vector as quat;
+export function interpQuat (out: quat, animVector: AnimVector, frame: number, left: number, right: number): quat {
+    const frames = animVector.Frames;
+    const values = animVector.Values;
+    const size = animVector.VectorSize;
+
+    if (frames[left] === frames[right] || animVector.LineType === LineType.DontInterp) {
+        return copyInto(out as Float32Array, values, left, size) as unknown as quat;
     }
 
-    const t = (frame - left.Frame) / (right.Frame - left.Frame);
+    const a = copyInto(leftVector, values, left, size);
+    const b = copyInto(rightVector, values, right, size);
+    const t = (frame - frames[left]) / (frames[right] - frames[left]);
 
-    if (lineType === LineType.DontInterp) {
-        return left.Vector as quat;
-    } else if (lineType === LineType.Hermite || lineType === LineType.Bezier) {
-        return quat.sqlerp(out, left.Vector as quat, left.OutTan as quat, right.InTan as quat, right.Vector as quat, t);
+    if (animVector.LineType === LineType.Hermite || animVector.LineType === LineType.Bezier) {
+        return quat.sqlerp(out, a as unknown as quat,
+            copyInto(leftOutTan, animVector.OutTans, left, size) as unknown as quat,
+            copyInto(rightInTan, animVector.InTans, right, size) as unknown as quat,
+            b as unknown as quat, t);
     } else {
-        return quat.slerp(out, left.Vector as quat, right.Vector as quat, t);
+        return quat.slerp(out, a as unknown as quat, b as unknown as quat, t);
     }
 }

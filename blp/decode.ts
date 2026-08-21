@@ -22,6 +22,23 @@ function bitVal (data: Uint8Array, bitCount: number, index: number): number {
     return (byte >> (valsPerByte - index % valsPerByte - 1)) & ((1 << bitCount) - 1);
 }
 
+// BLP palettes are BGRA. Packing them into a Uint32Array once lets the per-pixel loop below be a
+// single 32-bit store per pixel instead of a DataView read plus three byte writes.
+function buildPaletteLUT (blp: BLPImage): Uint32Array {
+    const palette = new Uint8Array(blp.data, 39 * 4, 256 * 4);
+    const lut = new Uint32Array(256);
+    const bytes = new Uint8Array(lut.buffer);
+
+    for (let i = 0; i < 256; ++i) {
+        bytes[i * 4]     = palette[i * 4 + 2];
+        bytes[i * 4 + 1] = palette[i * 4 + 1];
+        bytes[i * 4 + 2] = palette[i * 4];
+        bytes[i * 4 + 3] = 255;
+    }
+
+    return lut;
+}
+
 interface ImageDataLike {
     width: number;
     height: number;
@@ -105,25 +122,40 @@ export function getImageData (blp: BLPImage, mipmapLevel: number): ImageDataLike
 
         return decodeJPEG(data);
     } else {
-        const palette = new Uint8Array(blp.data, 39 * 4, 256 * 4),
-            width = blp.width / (1 << mipmapLevel),
-            height = blp.height / (1 << mipmapLevel),
+        // Clamped shift, not a divide: a BLP mip chain stops each axis at 1, so a 32x16 image
+        // ends 4x2, 2x1, 1x1. Dividing gave a fractional height for the deepest levels of any
+        // non-square texture, and a fractional pixel count with it.
+        const width = Math.max(1, blp.width >> mipmapLevel),
+            height = Math.max(1, blp.height >> mipmapLevel),
             size = width * height,
-            alphaData = new Uint8Array(blp.data, mipmap.offset + size, Math.ceil(size * blp.alphaBits / 8)),
+            indices = new Uint8Array(blp.data, mipmap.offset, size),
             imageData = createImageData(width, height),
-            valPerAlphaBit = 255 / ((1 << blp.alphaBits) - 1);
+            out = imageData.data;
+
+        // One 32-bit store per pixel through the palette LUT, rather than a DataView.getUint8 for
+        // the index plus three separate byte writes for BGR. The LUT already carries alpha 255,
+        // which covers the no-alpha case with no extra work.
+        const lut = buildPaletteLUT(blp);
+        const out32 = new Uint32Array(out.buffer, out.byteOffset, size);
 
         for (let i = 0; i < size; ++i) {
-            const paletteIndex = view.getUint8(mipmap.offset + i) * 4;
-            // BGRA order
-            imageData.data[i * 4]     = palette[paletteIndex + 2];
-            imageData.data[i * 4 + 1] = palette[paletteIndex + 1];
-            imageData.data[i * 4 + 2] = palette[paletteIndex];
+            out32[i] = lut[indices[i]];
+        }
 
-            if (blp.alphaBits > 0) {
-                imageData.data[i * 4 + 3] = bitVal(alphaData, blp.alphaBits, i) * valPerAlphaBit;
+        if (blp.alphaBits > 0) {
+            const alphaData = new Uint8Array(blp.data, mipmap.offset + size, Math.ceil(size * blp.alphaBits / 8));
+
+            if (blp.alphaBits === 8) {
+                // The overwhelmingly common case: alpha is already one byte per pixel.
+                for (let i = 0; i < size; ++i) {
+                    out[i * 4 + 3] = alphaData[i];
+                }
             } else {
-                imageData.data[i * 4 + 3] = 255;
+                const valPerAlphaBit = 255 / ((1 << blp.alphaBits) - 1);
+
+                for (let i = 0; i < size; ++i) {
+                    out[i * 4 + 3] = bitVal(alphaData, blp.alphaBits, i) * valPerAlphaBit;
+                }
             }
         }
 

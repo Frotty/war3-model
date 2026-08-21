@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 /// <reference types="@webgpu/types" />
 
-import {getShader} from './util';
+import {getShader, checkProgram} from './util';
 import {RendererData} from './rendererData';
 import {ModelInterp} from './modelInterp';
 import {FilterMode, Layer, LayerShading, Material, RibbonEmitter} from '../model';
@@ -139,11 +139,21 @@ export class RibbonsController {
     public initGL (glContext: WebGLRenderingContext): void {
         this.gl = glContext;
 
+        // See ParticlesController.initGL — nothing to draw means nothing to compile.
+        if (!this.emitters.length) {
+            return;
+        }
+
         this.initShaders();
     }
 
     public initGPUDevice (device: GPUDevice): void {
         this.device = device;
+
+        // Same reasoning as initGL: no emitters, no pipelines.
+        if (!this.emitters.length) {
+            return;
+        }
 
         this.gpuShaderModule = device.createShaderModule({
             label: 'ribbons shader module',
@@ -375,6 +385,10 @@ export class RibbonsController {
     }
 
     public render (mvMatrix: mat4, pMatrix: mat4): void {
+        if (!this.emitters.length) {
+            return;
+        }
+
         this.gl.useProgram(this.shaderProgram);
 
         this.gl.uniformMatrix4fv(this.shaderProgramLocations.pMatrixUniform, false, pMatrix);
@@ -408,6 +422,10 @@ export class RibbonsController {
     }
 
     public renderGPU (pass: GPURenderPassEncoder, mvMatrix: mat4, pMatrix: mat4): void {
+        if (!this.emitters.length) {
+            return;
+        }
+
         const VSUniformsValues = new ArrayBuffer(128);
         const VSUniformsViews = {
             mvMatrix: new Float32Array(VSUniformsValues, 0, 16),
@@ -505,9 +523,7 @@ export class RibbonsController {
         this.gl.attachShader(shaderProgram, fragment);
         this.gl.linkProgram(shaderProgram);
 
-        if (!this.gl.getProgramParameter(shaderProgram, this.gl.LINK_STATUS)) {
-            alert('Could not initialise shaders');
-        }
+        checkProgram(this.gl, shaderProgram, [vertex, fragment]);
 
         this.gl.useProgram(shaderProgram);
 

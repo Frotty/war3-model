@@ -75,6 +75,14 @@ fn ImportanceSampleGGX(Xi: vec2f, N: vec3f, roughness: f32) -> vec3f {
     return normalize(sampleVec);
 }
 
+fn DistributionGGX(NdotH: f32, roughness: f32) -> f32 {
+    let a: f32 = roughness * roughness;
+    let a2: f32 = a * a;
+    let denom: f32 = NdotH * NdotH * (a2 - 1.0) + 1.0;
+
+    return a2 / (PI * denom * denom);
+}
+
 @fragment fn fs(
     in: VSOut
 ) -> @location(0) vec4f {
@@ -82,7 +90,12 @@ fn ImportanceSampleGGX(Xi: vec2f, N: vec3f, roughness: f32) -> vec3f {
     let R: vec3f = N;
     let V: vec3f = R;
 
-    const SAMPLE_COUNT: u32 = 1024u;
+    // See the WebGL prefilterEnv shader: 256 samples read from the mip level matching each
+    // sample's solid angle, instead of 1024 all read from level 0.
+    const SAMPLE_COUNT: u32 = 256u;
+    const resolution: f32 = ${ENV_MAP_SIZE}.0;
+    const saTexel: f32 = 4.0 * PI / (6.0 * resolution * resolution);
+
     var totalWeight: f32 = 0.0;
     var prefilteredColor: vec3f = vec3f(0.0);
     for(var i: u32 = 0u; i < SAMPLE_COUNT; i++)
@@ -93,7 +106,16 @@ fn ImportanceSampleGGX(Xi: vec2f, N: vec3f, roughness: f32) -> vec3f {
 
         let NdotL: f32 = max(dot(N, L), 0.0);
         if(NdotL > 0.0) {
-            prefilteredColor += pow(textureSampleLevel(fsUniformTexture, fsUniformSampler, L, 0).rgb, vec3f(gamma)) * NdotL;
+            let NdotH: f32 = max(dot(N, H), 0.0);
+            let HdotV: f32 = max(dot(H, V), 0.0);
+            let pdf: f32 = DistributionGGX(NdotH, fsUniforms.roughness) * NdotH / (4.0 * HdotV) + 0.0001;
+            let saSample: f32 = 1.0 / (f32(SAMPLE_COUNT) * pdf + 0.0001);
+            var mipLevel: f32 = 0.0;
+            if (fsUniforms.roughness > 0.0) {
+                mipLevel = 0.5 * log2(saSample / saTexel);
+            }
+
+            prefilteredColor += pow(textureSampleLevel(fsUniformTexture, fsUniformSampler, L, mipLevel).rgb, vec3f(gamma)) * NdotL;
             totalWeight      += NdotL;
         }
     }
