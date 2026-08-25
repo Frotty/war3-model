@@ -91,4 +91,23 @@ runWithModels('animation output survives a generateMDX round trip unchanged', ()
     }
 });
 
+runWithModels('non-looping sequences remain on their final frame', () => {
+    for (const name of models) {
+        const model = parseMDX(readBuffer(name));
+        for (let sequence = 0; sequence < model.Sequences.length; ++sequence) {
+            const animation = model.Sequences[sequence];
+            if (!animation.NonLooping) {
+                continue;
+            }
+
+            const renderer = new ModelRenderer(model);
+            renderer.setSequence(sequence);
+            renderer.update(animation.Interval[1] - animation.Interval[0] + 1);
+            assert.equal(renderer.getFrame(), animation.Interval[1], `${name}: sequence ${sequence} did not stop`);
+            renderer.update(1000);
+            assert.equal(renderer.getFrame(), animation.Interval[1], `${name}: sequence ${sequence} looped`);
+        }
+    }
+});
+
 console.log('all tests passed');

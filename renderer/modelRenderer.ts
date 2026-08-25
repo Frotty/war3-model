@@ -1258,8 +1258,16 @@ export class ModelRenderer {
 
     public update (delta: number): void {
         this.rendererData.frame += delta;
-        if (this.rendererData.frame > this.rendererData.animationInfo.Interval[1]) {
-            this.rendererData.frame = this.rendererData.animationInfo.Interval[0];
+        const intervalStart = this.rendererData.animationInfo.Interval[0];
+        const intervalEnd = this.rendererData.animationInfo.Interval[1];
+        if (this.rendererData.animationInfo.NonLooping) {
+            // Warcraft keeps one-shot sequences on their final pose. Wrapping Birth/Death back
+            // to the first frame makes models such as treasurechest visibly pop open/closed again.
+            this.rendererData.frame = Math.min(this.rendererData.frame, intervalEnd);
+        } else if (this.rendererData.frame > intervalEnd) {
+            const duration = intervalEnd - intervalStart;
+            this.rendererData.frame = duration > 0 ?
+                intervalStart + ((this.rendererData.frame - intervalStart) % duration) : intervalStart;
         }
         this.updateGlobalSequences(delta);
 
