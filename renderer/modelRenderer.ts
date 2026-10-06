@@ -1302,7 +1302,7 @@ export class ModelRenderer {
         // Sort complete material passes by their first layer; never split authored composition.
         this.drawOrder = groups.map((batches, order) => ({batches, order})).sort((a, b) =>
             Number(b.batches[0].opaque) - Number(a.batches[0].opaque) ||
-            (a.batches[0].opaque ? 0 : a.batches[0].priority - b.batches[0].priority) || a.order - b.order)
+            a.batches[0].priority - b.batches[0].priority || a.order - b.order)
             .flatMap(entry => entry.batches);
     }
 

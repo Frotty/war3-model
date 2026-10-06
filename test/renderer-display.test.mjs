@@ -148,6 +148,17 @@ for (const [flags, translation, scale] of [[0,10,2], [1,0,2], [4,10,1], [5,0,1]]
 
 {
     const model = fixture();
+    model.Materials[0] = {PriorityPlane: 5, Layers: [{FilterMode: 0, Shading: 192, TextureID: 0, Alpha: 1},
+        {FilterMode: 2, Shading: 192, TextureID: 0, Alpha: 1}]};
+    model.Materials.push({PriorityPlane: -5, Layers: [{FilterMode: 1, Shading: 192, TextureID: 0, Alpha: 1}]});
+    model.Geosets.push({...model.Geosets[0], MaterialID: 1});
+    const renderer = new ModelRenderer(model);
+    assert.deepEqual(renderer.drawOrder.map(b => [b.index, b.layer]), [[1,0],[0,0],[0,1]],
+        'opaque groups respect priority planes while preserving all authored passes');
+}
+
+{
+    const model = fixture();
     model.GlobalSequences = [300];
     const renderer = new ModelRenderer(model);
     renderer.setPose(0, 501);

@@ -38,6 +38,17 @@ try {
  model.Materials[0].Layers[0].Shading|=1;
  const unshaded=await renderModelThumbnail(model,options);const b=await rgba(unshaded);
  check(Math.max(...b.filter((v,i)=>i%4===0))===255,'Unshaded bypasses lighting');
+ const priorityModel=parseMDL(source);
+ priorityModel.Materials[0].PriorityPlane=5;priorityModel.Materials[0].Layers[0].FilterMode=0;
+ priorityModel.Materials[0].Layers[0].Shading=209;
+ priorityModel.Materials.push({PriorityPlane:-5,Layers:[{...priorityModel.Materials[0].Layers[0],FilterMode:1}]});
+ priorityModel.Geosets.push({...priorityModel.Geosets[0],MaterialID:1});
+ priorityModel.GeosetAnims=[{GeosetId:0,Flags:2,Alpha:1,Color:new Float32Array([0,0,1])},
+  {GeosetId:1,Flags:2,Alpha:1,Color:new Float32Array([0,1,0])}];
+ const priorityCapture=await renderModelThumbnail(priorityModel,options);const priorityPixels=await rgba(priorityCapture);
+ const priorityCenter=(48*128+64)*4;
+ check(priorityPixels[priorityCenter]>200&&priorityPixels[priorityCenter+1]<10,
+  'Opaque and alpha-tested priority planes order overlapping no-depth layers');
  const maskedModel=parseMDL(source);maskedModel.Textures.push({Image:'',ReplaceableId:1,Flags:0});
  maskedModel.Materials[0].Layers.unshift({FilterMode:2,Shading:17,TextureID:1,
   Alpha:{Frames:new Uint32Array([0,500]),Values:new Float32Array([0,1]),VectorSize:1,LineType:0,GlobalSeqId:null}});
