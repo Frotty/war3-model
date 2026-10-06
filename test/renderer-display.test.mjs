@@ -182,6 +182,23 @@ function ribbonFixture() {
     model.RibbonEmitters = [emitter];
     return new ModelRenderer(model);
 }
+for (const animatedTexture of [false, true]) {
+    const model = fixture();
+    model.Textures.unshift({Image: '', ReplaceableId: 1, Flags: 0});
+    const textureID = animatedTexture ? {Frames: new Uint32Array([0]), Values: new Uint32Array([0]),
+        VectorSize: 1, LineType: 0, GlobalSeqId: null} : 0;
+    model.Materials[0].Layers = [{FilterMode: 2, Shading: 0, TextureID: textureID, Alpha: 0},
+        {FilterMode: 2, Shading: 0, TextureID: 1, Alpha: 1}];
+    const renderer = new ModelRenderer(model);
+    renderer.setPose(0, 0);
+    const draws = [];
+    mockGL(renderer, draws);
+    renderer.render(mat4.create(), mat4.create(), {});
+    assert.deepEqual(draws, [], 'mask layers are consumed rather than drawn independently');
+    assert.equal(renderer.getVisibleBounds(), null, 'bounds follow mask exclusions from actual draws');
+    model.Materials[0].Layers[0].Alpha = 1;
+    assert.ok(renderer.getVisibleBounds(), 'visible replaceable passes still contribute bounds');
+}
 {
     const model = fixture();
     model.ParticleEmitters2 = [{EmissionRate: 0, LifeSpan: 1, TextureID: 0, FilterMode: 0}];

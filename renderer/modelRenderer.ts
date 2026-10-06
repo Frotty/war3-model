@@ -1234,21 +1234,28 @@ export class ModelRenderer {
     public getVisibleBounds ({levelOfDetail = 0, includeEffects = true}: {levelOfDetail?: number; includeEffects?: boolean} = {}): VisibleBounds | null {
         const bounds = emptyBounds();
         const point = vec3.create();
-        for (let i = 0; i < this.model.Geosets.length; ++i) {
+        const visibleGeosets = new Set(this.drawOrder.filter(batch =>
+            batch.kind === 'geoset' && this.isGeosetBatchVisible(batch, levelOfDetail)).map(batch => batch.index));
+        visibleGeosets.forEach(i => {
             const geoset = this.model.Geosets[i];
-            if (this.rendererData.geosetAlpha[i] < 1e-6 ||
-                (geoset.LevelOfDetail !== undefined && geoset.LevelOfDetail !== levelOfDetail) ||
-                !this.model.Materials[geoset.MaterialID].Layers.some((layer, index) =>
-                    (!this.isHD || index === 0) && this.getLayerAlpha(layer) > 1e-6)) continue;
             for (let j = 0; j < geoset.Faces.length; ++j) {
                 expandBounds(bounds, skinVertex(point, geoset, this.rendererData.nodes, geoset.Faces[j]));
             }
-        }
+        });
         if (includeEffects) {
             this.particlesController.expandBounds(bounds);
             this.ribbonsController.expandBounds(bounds);
         }
         return Number.isFinite(bounds.minimum[0]) ? bounds : null;
+    }
+
+    /** Shared by GL/GPU drawing and bounds so mask-only passes cannot affect framing. */
+    private isGeosetBatchVisible (batch: DrawBatch, levelOfDetail: number): boolean {
+        const geoset = this.model.Geosets[batch.index];
+        return !!geoset && this.rendererData.geosetAlpha[batch.index] >= 1e-6 &&
+            (geoset.LevelOfDetail === undefined || geoset.LevelOfDetail === levelOfDetail) &&
+            !this.skipAnimatedMaskLayer(geoset.MaterialID, batch.layer) &&
+            this.getLayerAlpha(this.model.Materials[geoset.MaterialID].Layers[batch.layer]) >= 1e-6;
     }
 
     private assertInitialized (): void {
@@ -1725,14 +1732,7 @@ export class ModelRenderer {
                 }
                 const i = batch.index;
                 const geoset = this.model.Geosets[i];
-                if (this.skipAnimatedMaskLayer(geoset.MaterialID, batch.layer)) continue;
-                if (this.getLayerAlpha(this.model.Materials[geoset.MaterialID].Layers[batch.layer]) < 1e-6) continue;
-                if (this.rendererData.geosetAlpha[i] < 1e-6) {
-                    continue;
-                }
-                if (geoset.LevelOfDetail !== undefined && geoset.LevelOfDetail !== levelOfDetail) {
-                    continue;
-                }
+                if (!this.isGeosetBatchVisible(batch, levelOfDetail)) continue;
 
                 this.ensureGeosetGPUBuffers(i);
 
@@ -2145,14 +2145,7 @@ export class ModelRenderer {
             }
             const i = batch.index;
             const geoset = this.model.Geosets[i];
-            if (this.skipAnimatedMaskLayer(geoset.MaterialID, batch.layer)) continue;
-            if (this.getLayerAlpha(this.model.Materials[geoset.MaterialID].Layers[batch.layer]) < 1e-6) continue;
-            if (this.rendererData.geosetAlpha[i] < 1e-6) {
-                continue;
-            }
-            if (geoset.LevelOfDetail !== undefined && geoset.LevelOfDetail !== levelOfDetail) {
-                continue;
-            }
+            if (!this.isGeosetBatchVisible(batch, levelOfDetail)) continue;
 
             this.ensureGeosetBuffers(i);
 

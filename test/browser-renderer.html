@@ -38,6 +38,30 @@ try {
  model.Materials[0].Layers[0].Shading|=1;
  const unshaded=await renderModelThumbnail(model,options);const b=await rgba(unshaded);
  check(Math.max(...b.filter((v,i)=>i%4===0))===255,'Unshaded bypasses lighting');
+ const maskedModel=parseMDL(source);maskedModel.Textures.push({Image:'',ReplaceableId:1,Flags:0});
+ maskedModel.Materials[0].Layers.unshift({FilterMode:2,Shading:17,TextureID:1,
+  Alpha:{Frames:new Uint32Array([0,500]),Values:new Float32Array([0,1]),VectorSize:1,LineType:0,GlobalSeqId:null}});
+ const maskedCapture=await renderModelThumbnail(maskedModel,options);const maskedPixels=await rgba(maskedCapture);
+ check(maskedCapture.frame>=500&&maskedPixels.some((value,index)=>index%4===3&&value>200),
+  'Mask-only opacity does not prevent the thumbnail visible-frame search');
+ const limitCanvas=document.createElement('canvas');limitCanvas.width=1;limitCanvas.height=1;
+ const limitGL=limitCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
+ const limitParameter=limitGL.getParameter.bind(limitGL);let assetLoads=0;
+ for(const [parameter, value] of [[limitGL.MAX_RENDERBUFFER_SIZE,32],[limitGL.MAX_VIEWPORT_DIMS,new Int32Array([64,16])]]) {
+  limitGL.getParameter=pname=>pname===parameter?value:limitParameter(pname);
+  let rejected=false;
+  try{await renderModelThumbnail(model,{...options,width:24,height:16,canvas:limitCanvas,
+   loadTexture:async()=>{assetLoads++;return white;}});}catch(error){rejected=/context limits/.test(error.message);}
+  check(rejected&&assetLoads===0&&limitCanvas.width===1&&limitCanvas.height===1,
+   'Device backing-size limits reject before resize or loading assets: '+parameter);
+ }
+ limitGL.getParameter=limitParameter;
+ Object.defineProperty(limitGL,'drawingBufferWidth',{configurable:true,get:()=>1});
+ let backingRejected=false;try{await renderModelThumbnail(model,{...options,width:16,height:16,canvas:limitCanvas,
+  loadTexture:async()=>{assetLoads++;return white;}});}catch(error){backingRejected=/drawing buffer/.test(error.message);}
+ check(backingRejected&&assetLoads===0,'An undersized drawing buffer rejects instead of encoding a blank PNG');
+ delete limitGL.drawingBufferWidth;
+ limitGL.getExtension('WEBGL_lose_context')?.loseContext();
  for(const [uniformBudget, expectedLights] of [[16,0],[20,2],[128,8]]) {
   const legacyCanvas=document.createElement('canvas');legacyCanvas.width=64;legacyCanvas.height=64;
   const legacyGL=legacyCanvas.getContext('webgl',{preserveDrawingBuffer:true});

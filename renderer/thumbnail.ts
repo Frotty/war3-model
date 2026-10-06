@@ -180,9 +180,8 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
         !Number.isFinite(warmupMs) || warmupMs < 0 || warmupMs > 10000) {
         throw new Error('Invalid thumbnail size, supersampling, or warmup');
     }
-    const canvas = options.canvas || newCanvas(width * supersampling, height * supersampling);
-    canvas.width = width * supersampling;
-    canvas.height = height * supersampling;
+    // Acquire limits on a tiny backing buffer before allocating the requested capture size.
+    const canvas = options.canvas || newCanvas(1, 1);
     const gl = canvas.getContext('webgl2', {alpha: true, antialias: true, preserveDrawingBuffer: true}) as WebGL2RenderingContext;
     if (!gl) throw new Error('WebGL2 is required for thumbnails');
     if (!gl.getContextAttributes()?.preserveDrawingBuffer) throw new Error('Thumbnail canvas must preserve its drawing buffer');
@@ -192,6 +191,18 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
         model.Textures.find(texture => texture.Image === path)?.Flags || 0, maxTextureSize]);
     let captured: ThumbnailResult;
     try {
+        const viewport = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array;
+        const renderbufferLimit = gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) as number;
+        const backingWidth = width * supersampling;
+        const backingHeight = height * supersampling;
+        if (backingWidth > Math.min(renderbufferLimit, viewport[0]) || backingHeight > Math.min(renderbufferLimit, viewport[1])) {
+            throw new Error('Thumbnail backing size exceeds WebGL context limits');
+        }
+        canvas.width = backingWidth;
+        canvas.height = backingHeight;
+        if (gl.isContextLost() || gl.drawingBufferWidth !== backingWidth || gl.drawingBufferHeight !== backingHeight) {
+            throw new Error('Unable to allocate the requested thumbnail drawing buffer');
+        }
         renderer.setEnvironmentMapProcessingEnabled(options.useEnvironmentMap ?? false);
         renderer.setEnvironmentMapNamespace(options.textureNamespace || '');
         renderer.setTextureSizeLimit(maxTextureSize);
