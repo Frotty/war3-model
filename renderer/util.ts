@@ -1,5 +1,38 @@
 import {vec3, quat, mat4} from 'gl-matrix';
 
+const sharedPrograms = new WeakMap<WebGLRenderingContext, Map<string, WebGLProgram>>();
+
+/** A small fixed set of mesh/effect programs is reused by every renderer on a context. */
+export function getSharedProgram (gl: WebGLRenderingContext, vertexSource: string, fragmentSource: string): WebGLProgram {
+    let programs = sharedPrograms.get(gl);
+    if (!programs) sharedPrograms.set(gl, programs = new Map());
+    const key = vertexSource + '\u0000' + fragmentSource;
+    const cached = programs.get(key);
+    if (cached && gl.isProgram(cached)) return cached;
+    const vertex = getShader(gl, vertexSource, gl.VERTEX_SHADER);
+    const fragment = getShader(gl, fragmentSource, gl.FRAGMENT_SHADER);
+    const program = gl.createProgram();
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, fragment);
+    gl.linkProgram(program);
+    const valid = checkProgram(gl, program, [vertex, fragment]);
+    gl.detachShader(program, vertex);
+    gl.detachShader(program, fragment);
+    gl.deleteShader(vertex);
+    gl.deleteShader(fragment);
+    if (!valid) {
+        gl.deleteProgram(program);
+        throw new Error('Unable to link renderer shaders');
+    }
+    programs.set(key, program);
+    return program;
+}
+
+export function releaseSharedPrograms (gl: WebGLRenderingContext): void {
+    sharedPrograms.get(gl)?.forEach(program => gl.deleteProgram(program));
+    sharedPrograms.delete(gl);
+}
+
 export function mat4fromRotationOrigin (out: mat4, rotation: quat, origin: vec3): mat4 {
     const x = rotation[0], y = rotation[1], z = rotation[2], w = rotation[3],
         x2 = x + x,

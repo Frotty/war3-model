@@ -4,10 +4,10 @@
 import type {DdsInfo} from 'dds-parser';
 import {
     Model, Node, AnimVector, NodeFlags, Layer, LayerShading, FilterMode,
-    TextureFlags, TVertexAnim, Geoset
+    TextureFlags, TVertexAnim, Geoset, GeosetAnimFlags, MaterialRenderMode, Sequence
 } from '../model';
 import {vec3, quat, mat3, mat4} from 'gl-matrix';
-import {mat4fromRotationOrigin, getShader, checkProgram, isWebGL2} from './util';
+import {mat4fromRotationOrigin, getShader, checkProgram, isWebGL2, getSharedProgram, releaseSharedPrograms} from './util';
 import {ModelInterp} from './modelInterp';
 import {RendererData, NodeWrapper} from './rendererData';
 import {ParticlesController} from './particles';
@@ -41,12 +41,19 @@ import convoluteEnvDiffuseShader from './shaders/webgpu/convoluteEnvDiffuse.wgsl
 import prefilterEnvShaderSource from './shaders/webgpu/prefilterEnv.wgsl?raw';
 import integrateBRDFFShader from './shaders/webgpu/integrateBRDF.wgsl?raw';
 import { generateMips } from './generateMips';
+import {emptyBounds, expandBounds, skinVertex, sortedFaces, VisibleBounds} from './geometry';
+import {cancellable, waitForGL, WaitOptions} from './readiness';
+import {TextureLoader, TextureSource} from './textureLoader';
+import {decode as decodeBLP, getImageData} from '../blp/decode';
+import {createLighting, evaluateLighting, MAX_MODEL_LIGHTS} from './lighting';
+import {resizeTexture, textureMipLevel} from './textureSizing';
 
 // actually, all is number
 export type DDS_FORMAT = WEBGL_compressed_texture_s3tc['COMPRESSED_RGBA_S3TC_DXT1_EXT'] |
     WEBGL_compressed_texture_s3tc['COMPRESSED_RGBA_S3TC_DXT3_EXT'] |
     WEBGL_compressed_texture_s3tc['COMPRESSED_RGBA_S3TC_DXT5_EXT'] |
-    WEBGL_compressed_texture_s3tc['COMPRESSED_RGB_S3TC_DXT1_EXT'];
+    WEBGL_compressed_texture_s3tc['COMPRESSED_RGB_S3TC_DXT1_EXT'] |
+    EXT_texture_compression_rgtc['COMPRESSED_RED_GREEN_RGTC2_EXT'];
 
 const MAX_NODES = 254;
 
@@ -76,6 +83,14 @@ interface SharedEnvMaps<T> {
     envTexture: T;
     irradianceMap: T;
     prefilteredEnvMap: T;
+}
+
+interface DrawBatch {
+    kind: 'geoset' | 'particle' | 'ribbon';
+    index: number;
+    layer: number;
+    priority: number;
+    opaque: boolean;
 }
 
 // The env cubemap, its irradiance convolution and its roughness prefilter depend only on the
@@ -165,6 +180,9 @@ const defaultScaling = vec3.fromValues(1, 1, 1);
 
 const tempParentRotationQuat: quat = quat.create();
 const tempParentRotationMat: mat4 = mat4.create();
+const tempInheritedScale: vec3 = vec3.create();
+const tempInheritedPivot: vec3 = vec3.create();
+const tempInheritedParent: mat4 = mat4.create();
 const tempCameraMat: mat4 = mat4.create();
 const tempTransformedPivotPoint: vec3 = vec3.create();
 const tempAxis: vec3 = vec3.create();
@@ -176,7 +194,6 @@ const tempCross0: vec3 = vec3.create();
 const tempCross1: vec3 = vec3.create();
 
 const tempPos: vec3 = vec3.create();
-const tempSum: vec3 = vec3.create();
 const tempVec3: vec3 = vec3.create();
 
 const identifyMat3: mat3 = mat3.create();
@@ -304,8 +321,6 @@ export class ModelRenderer {
     // implementation and it used to run for every texture uploaded.
     private driverMaxAnisotropy = 1;
     private requestedMaxAnisotropy = DEFAULT_MAX_ANISOTROPY;
-    private vertexShader: WebGLShader | null;
-    private fragmentShader: WebGLShader | null;
     private shaderProgram: WebGLProgram | null;
     private vsBindGroupLayout: GPUBindGroupLayout | null;
     private fsBindGroupLayout: GPUBindGroupLayout | null;
@@ -333,6 +348,12 @@ export class ModelRenderer {
         replaceableColorUniform: WebGLUniformLocation | null;
         replaceableTypeUniform: WebGLUniformLocation | null;
         layerAlphaUniform: WebGLUniformLocation | null;
+        geosetColorUniform: WebGLUniformLocation | null;
+        lightingUniform: WebGLUniformLocation | null;
+        ambientUniform: WebGLUniformLocation | null;
+        modelLightPositionsUniform: WebGLUniformLocation | null;
+        modelLightColorsUniform: WebGLUniformLocation | null;
+        modelLightAttenuationUniform: WebGLUniformLocation | null;
         discardAlphaLevelUniform: WebGLUniformLocation | null;
         tVertexAnimUniform: WebGLUniformLocation | null;
         useReplaceableMaskUniform: WebGLUniformLocation | null;
@@ -381,6 +402,13 @@ export class ModelRenderer {
     private vertexBuffer: WebGLBuffer[] = [];
     private normalBuffer: WebGLBuffer[] = [];
     private vertices: Float32Array[] = []; // Array per geoset for software skinning
+    private posedNormals: Float32Array[] = [];
+    private softwareGroupMatrices: mat4[][] = [];
+    private softwareGroupNormals: mat3[][] = [];
+    private textureSizeLimit = 0;
+    private environmentMapNamespace = '';
+    private supportedCompressedFormats: Set<number>;
+    private textureDimensions = new Map<string, [number, number]>();
     private texCoordBuffer: WebGLBuffer[] = [];
     private indexBuffer: WebGLBuffer[] = [];
     private wireframeIndexBuffer: WebGLBuffer[] = [];
@@ -392,6 +420,20 @@ export class ModelRenderer {
     // so the per-frame draw only has to bind the VAO instead of re-issuing vertexAttribPointer calls.
     private vao: (WebGLVertexArrayObject | null)[] = [];
     private useVAO = false;
+    private extraTexCoordBuffers: WebGLBuffer[][] = [];
+    private extraGPUTexCoordBuffers: GPUBuffer[][] = [];
+    private disposed = false;
+    private textureLoadErrors = new Map<string, unknown>();
+    private textureLoads = new Map<string, Promise<void>>();
+    private textureListeners = new Set<() => void>();
+    private renderedListeners = new Set<{resolve: () => void; reject: (error: unknown) => void}>();
+    private initialRenderComplete = false;
+    private initialRenderPending = false;
+    private drawOrder: DrawBatch[] = [];
+    private lighting = createLighting();
+    private glModelLightLimit = MAX_MODEL_LIGHTS;
+    private ambientStrength = 0.8;
+    private diffuseStrength = 0.2;
     // Shadowed GL state; see applyLayerState.
     private stateCullFace: boolean | null = null;
     private stateBlend: boolean | null = null;
@@ -416,7 +458,6 @@ export class ModelRenderer {
     private cubeGPUVertexBuffer: GPUBuffer;
     private squareVertexBuffer: WebGLBuffer;
     private brdfLUT: WebGLTexture;
-    private whiteTexture: WebGLTexture;
     private flatNormalTexture: WebGLTexture;
     private defaultOrmTexture: WebGLTexture;
     private gpuBrdfLUT: GPUTexture;
@@ -482,6 +523,12 @@ export class ModelRenderer {
             replaceableColorUniform: null,
             replaceableTypeUniform: null,
             layerAlphaUniform: null,
+            geosetColorUniform: null,
+            lightingUniform: null,
+            ambientUniform: null,
+            modelLightPositionsUniform: null,
+            modelLightColorsUniform: null,
+            modelLightAttenuationUniform: null,
             discardAlphaLevelUniform: null,
             tVertexAnimUniform: null,
             useReplaceableMaskUniform: null,
@@ -517,6 +564,7 @@ export class ModelRenderer {
             nodes: [],
             geosetAnims: [],
             geosetAlpha: [],
+            geosetColor: [],
             materialLayerTextureID: [],
             materialLayerNormalTextureID: [],
             materialLayerOrmTextureID: [],
@@ -529,6 +577,7 @@ export class ModelRenderer {
             shadowBias: 0,
             shadowSmoothingStep: 0,
             textures: {},
+            whiteTexture: null,
             gpuTextures: {},
             gpuSamplers: [],
             gpuDepthSampler: null,
@@ -586,6 +635,12 @@ export class ModelRenderer {
         for (let i = 0; i < model.GeosetAnims.length; ++i) {
             this.rendererData.geosetAnims[model.GeosetAnims[i].GeosetId] = model.GeosetAnims[i];
         }
+        this.interp = new ModelInterp(this.rendererData);
+        for (let i = 0; i < model.Geosets.length; ++i) {
+            this.rendererData.geosetColor[i] = vec3.fromValues(1, 1, 1);
+            this.rendererData.geosetAlpha[i] = this.findAlpha(i);
+            this.updateGeosetColor(i);
+        }
 
         for (let i = 0; i < model.Materials.length; ++i) {
             this.rendererData.materialLayerTextureID[i] = new Array(model.Materials[i].Layers.length);
@@ -595,10 +650,11 @@ export class ModelRenderer {
         }
         this.initLayerTextureAnimations();
         this.initMaterialLookups();
+        this.initDrawOrder();
 
-        this.interp = new ModelInterp(this.rendererData);
         this.particlesController = new ParticlesController(this.interp, this.rendererData);
         this.ribbonsController = new RibbonsController(this.interp, this.rendererData);
+        evaluateLighting(this.lighting, this.rendererData, this.interp, this.ambientStrength, this.diffuseStrength);
     }
 
     private debugLogOnce (key: string, ...args: unknown[]): void {
@@ -630,6 +686,17 @@ export class ModelRenderer {
      * only when the context itself is going away and you want the memory back immediately.
      */
     public static releaseSharedResources (gl: WebGLRenderingContext | WebGL2RenderingContext): void {
+        releaseSharedPrograms(gl);
+        ModelRenderer.releaseSharedEnvironmentMaps(gl);
+        const brdfLUT = sharedBrdfLUT.get(gl);
+        if (brdfLUT) {
+            gl.deleteTexture(brdfLUT);
+            sharedBrdfLUT.delete(gl);
+        }
+    }
+
+    /** Invalidate derived images after their source assets change; keep programs and the LUT warm. */
+    public static releaseSharedEnvironmentMaps (gl: WebGLRenderingContext | WebGL2RenderingContext): void {
         const maps = sharedEnvMaps.get(gl);
         if (maps) {
             maps.forEach(entry => {
@@ -639,14 +706,15 @@ export class ModelRenderer {
             });
             sharedEnvMaps.delete(gl);
         }
-        const brdfLUT = sharedBrdfLUT.get(gl);
-        if (brdfLUT) {
-            gl.deleteTexture(brdfLUT);
-            sharedBrdfLUT.delete(gl);
-        }
     }
 
     public destroy (): void {
+        this.disposed = true;
+        this.notifyTexturesChanged();
+        this.renderedListeners.forEach(listener => listener.reject(new Error('Renderer was destroyed')));
+        this.renderedListeners.clear();
+        this.extraTexCoordBuffers.forEach(buffers => buffers.forEach(buffer => this.gl?.deleteBuffer(buffer)));
+        this.extraGPUTexCoordBuffers.forEach(buffers => buffers.forEach(buffer => buffer.destroy()));
         if (this.particlesController) {
             this.particlesController.destroy();
             this.particlesController = null;
@@ -687,7 +755,7 @@ export class ModelRenderer {
             this.gpuVSUniformsBuffer?.destroy();
             for (const materialID in this.gpuFSUniformsBuffers) {
                 for (const buffer of this.gpuFSUniformsBuffers[materialID]) {
-                    buffer.destroy();
+                    buffer?.destroy();
                 }
             }
 
@@ -733,17 +801,6 @@ export class ModelRenderer {
             }
 
             if (this.shaderProgram) {
-                if (this.vertexShader) {
-                    this.gl.detachShader(this.shaderProgram, this.vertexShader);
-                    this.gl.deleteShader(this.vertexShader);
-                    this.vertexShader = null;
-                }
-                if (this.fragmentShader) {
-                    this.gl.detachShader(this.shaderProgram, this.fragmentShader);
-                    this.gl.deleteShader(this.fragmentShader);
-                    this.fragmentShader = null;
-                }
-                this.gl.deleteProgram(this.shaderProgram);
                 this.shaderProgram = null;
             }
 
@@ -773,7 +830,8 @@ export class ModelRenderer {
             // cache, not by this renderer — another renderer on the same context is very likely
             // still using them. They are released with the context itself, or explicitly through
             // ModelRenderer.releaseSharedResources(gl).
-            this.gl.deleteTexture(this.whiteTexture);
+            this.gl.deleteTexture(this.rendererData.whiteTexture);
+            this.rendererData.whiteTexture = null;
             this.gl.deleteTexture(this.flatNormalTexture);
             this.gl.deleteTexture(this.defaultOrmTexture);
 
@@ -807,7 +865,7 @@ export class ModelRenderer {
     public initGL (glContext: WebGL2RenderingContext | WebGLRenderingContext): void {
         this.gl = glContext;
         // Max bones + MV + P
-        this.softwareSkinning = this.gl.getParameter(this.gl.MAX_VERTEX_UNIFORM_VECTORS) < 4 * (MAX_NODES + 2);
+        this.softwareSkinning = !this.isHD && this.gl.getParameter(this.gl.MAX_VERTEX_UNIFORM_VECTORS) < 4 * (MAX_NODES + 2);
         this.anisotropicExt = (
             this.gl.getExtension('EXT_texture_filter_anisotropic') ||
             this.gl.getExtension('MOZ_EXT_texture_filter_anisotropic') ||
@@ -851,7 +909,7 @@ export class ModelRenderer {
             return texture;
         };
 
-        this.whiteTexture = make(255, 255, 255, 255);
+        this.rendererData.whiteTexture = make(255, 255, 255, 255);
         // Flat tangent-space normal (0, 0, 1).
         this.flatNormalTexture = make(128, 128, 255, 255);
         // The HD shader reads ORM as occlusion.r / roughness.g / metallic.b / teamColorFactor.a,
@@ -881,6 +939,11 @@ export class ModelRenderer {
     }
 
     public setTextureImage (path: string, img: HTMLImageElement): void {
+        if (this.textureSizeLimit && Math.max(img.width, img.height) > this.textureSizeLimit) {
+            this.setTextureImageData(path, [resizeTexture(img, this.textureSizeLimit)]);
+            return;
+        }
+        this.textureDimensions.set(path, [img.width, img.height]);
         this.debugLogOnce(`texture-image:${path}`, 'Uploading texture image', {
             path,
             width: img.width,
@@ -905,6 +968,7 @@ export class ModelRenderer {
             );
             generateMips(this.device, texture);
             this.processEnvMaps(path);
+            this.notifyTexturesChanged();
         } else {
             this.rendererData.textures[path] = this.gl.createTexture();
             this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[path]);
@@ -916,12 +980,22 @@ export class ModelRenderer {
             this.gl.generateMipmap(this.gl.TEXTURE_2D);
 
             this.processEnvMaps(path);
+            this.notifyTexturesChanged();
 
             this.gl.bindTexture(this.gl.TEXTURE_2D, null);
         }
     }
 
     public setTextureImageData (path: string, imageData: ImageData[]): void {
+        if (!imageData.length) throw new Error('Texture image data is empty');
+        if (this.textureSizeLimit) {
+            const level = textureMipLevel(imageData[0].width, imageData[0].height, imageData.length, this.textureSizeLimit);
+            imageData = imageData.slice(level);
+            if (Math.max(imageData[0].width, imageData[0].height) > this.textureSizeLimit) {
+                imageData = [resizeTexture(imageData[0], this.textureSizeLimit)];
+            }
+        }
+        this.textureDimensions.set(path, [imageData[0].width, imageData[0].height]);
         // The alpha histogram is a full O(width * height) scan whose only consumer is the debug
         // log below, so it stays behind the flag: it cost 1.7 ms per 1024^2 texture and ~6.8 ms
         // per 2048^2 one, on every texture of every model, whether or not anyone was looking.
@@ -998,6 +1072,7 @@ export class ModelRenderer {
                 generateMips(this.device, texture);
             }
             this.processEnvMaps(path);
+            this.notifyTexturesChanged();
         } else {
             this.rendererData.textures[path] = this.gl.createTexture();
             this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[path]);
@@ -1034,6 +1109,7 @@ export class ModelRenderer {
             const flags = this.model.Textures.find(it => it.Image === path)?.Flags || 0;
             this.setTextureParameters(flags, hasMipmaps, this.rendererData.textures[path]);
             this.processEnvMaps(path);
+            this.notifyTexturesChanged();
 
             this.gl.bindTexture(this.gl.TEXTURE_2D, null);
         }
@@ -1055,6 +1131,8 @@ export class ModelRenderer {
         // to the texture. Default to what it was actually uploaded with rather than assuming none.
         this.setTextureParameters(flags, hasMipmaps ?? mipmappedTextures.has(texture), texture);
         this.gl.bindTexture(this.gl.TEXTURE_2D, null);
+        this.processEnvMaps(path);
+        this.notifyTexturesChanged();
         return true;
     }
 
@@ -1062,7 +1140,247 @@ export class ModelRenderer {
         return this.rendererData.textures[path];
     }
 
+    /** Applies to subsequent uploads; zero preserves original texture resolution. */
+    public setTextureSizeLimit (maximum = 0): void {
+        if (!Number.isInteger(maximum) || maximum < 0) throw new Error('Texture size limit must be a non-negative integer');
+        this.textureSizeLimit = maximum;
+    }
+
+    /** Isolate derived environment maps when archives reuse texture paths. Set before uploads. */
+    public setEnvironmentMapNamespace (namespace: string): void {
+        this.environmentMapNamespace = namespace;
+    }
+
+    public getTextureDimensions (path: string): readonly [number, number] | undefined {
+        return this.textureDimensions.get(path);
+    }
+
+    public getMissingTexturePaths (): string[] {
+        return Array.from(new Set(this.model.Textures.map(texture => texture.Image).filter(path =>
+            path && !(this.device ? this.rendererData.gpuTextures[path] : this.rendererData.textures[path]))));
+    }
+
+    public async loadTextures (loader: TextureLoader, options: WaitOptions & {allowMissingTextures?: boolean} = {}): Promise<string[]> {
+        this.assertInitialized();
+        const loads: Promise<void>[] = [];
+        const missingPaths = new Set(this.getMissingTexturePaths());
+        this.model.Textures.forEach((texture, index) => {
+            if (!texture.Image || !missingPaths.has(texture.Image)) return;
+            let load = this.textureLoads.get(texture.Image);
+            if (!load) {
+                this.textureLoadErrors.delete(texture.Image);
+                load = Promise.resolve().then(() => loader(texture, index, options.signal)).then(source => {
+                    if (this.disposed || options.signal?.aborted) throw new Error('Texture loading was cancelled');
+                    this.uploadTextureSource(texture.Image, source);
+                    this.textureLoadErrors.delete(texture.Image);
+                }).catch(error => {
+                    this.textureLoadErrors.set(texture.Image, error);
+                    throw error;
+                }).finally(() => {
+                    this.textureLoads.delete(texture.Image);
+                    this.notifyTexturesChanged();
+                });
+                this.textureLoads.set(texture.Image, load);
+            }
+            loads.push(load);
+        });
+        await cancellable(Promise.allSettled(loads), options);
+        const missing = this.getMissingTexturePaths();
+        if (missing.length && !options.allowMissingTextures) throw new Error(`Missing textures: ${missing.join(', ')}`);
+        return missing;
+    }
+
+    public whenReady (options: WaitOptions = {}): Promise<void> {
+        try { this.assertInitialized(); } catch (error) { return Promise.reject(error); }
+        let listener: () => void;
+        const ready = new Promise<void>((resolve, reject) => {
+            listener = (): void => {
+                if (this.disposed) { reject(new Error('Renderer was destroyed')); return; }
+                const missing = this.getMissingTexturePaths();
+                if (missing.some(path => this.textureLoadErrors.has(path))) {
+                    reject(new Error(`Missing textures: ${missing.join(', ')}`));
+                } else if (!missing.length) resolve();
+            };
+            this.textureListeners.add(listener);
+            listener();
+        });
+        return cancellable(ready, options).finally(() => this.textureListeners.delete(listener));
+    }
+
+    /** Resolves after the first texture-complete draw has finished on the GPU. */
+    public whenRendered (options: WaitOptions = {}): Promise<void> {
+        if (this.disposed) return Promise.reject(new Error('Renderer was destroyed'));
+        if (this.initialRenderComplete) return Promise.resolve();
+        let listener: {resolve: () => void; reject: (error: unknown) => void};
+        const rendered = new Promise<void>((resolve, reject) => {
+            listener = {resolve, reject};
+            this.renderedListeners.add(listener);
+        });
+        return cancellable(rendered, options).finally(() => this.renderedListeners.delete(listener));
+    }
+
+    /** Evaluate a frozen pose, draw once, and wait for actual GPU completion. */
+    public async renderAsync (mvMatrix: mat4, pMatrix: mat4,
+        options: Parameters<ModelRenderer['render']>[2] & WaitOptions & {allowMissingTextures?: boolean} = {}): Promise<void> {
+        this.assertInitialized();
+        if (!options.allowMissingTextures) await this.whenReady(options);
+        this.update(0);
+        this.render(mvMatrix, pMatrix, options);
+        await (this.device ? cancellable(this.device.queue.onSubmittedWorkDone(), options) : waitForGL(this.gl, options));
+    }
+
+    /** Bounds of drawn, posed vertices, independent of frequently inaccurate authored extents. */
+    public getVisibleBounds ({levelOfDetail = 0, includeEffects = true}: {levelOfDetail?: number; includeEffects?: boolean} = {}): VisibleBounds | null {
+        const bounds = emptyBounds();
+        const point = vec3.create();
+        const visibleGeosets = new Set(this.drawOrder.filter(batch =>
+            batch.kind === 'geoset' && this.isGeosetBatchVisible(batch, levelOfDetail)).map(batch => batch.index));
+        visibleGeosets.forEach(i => {
+            const geoset = this.model.Geosets[i];
+            for (let j = 0; j < geoset.Faces.length; ++j) {
+                expandBounds(bounds, skinVertex(point, geoset, this.rendererData.nodes, geoset.Faces[j]));
+            }
+        });
+        if (includeEffects) {
+            this.particlesController.expandBounds(bounds);
+            this.ribbonsController.expandBounds(bounds);
+        }
+        return Number.isFinite(bounds.minimum[0]) ? bounds : null;
+    }
+
+    /** Shared by GL/GPU drawing and bounds so mask-only passes cannot affect framing. */
+    private isGeosetBatchVisible (batch: DrawBatch, levelOfDetail: number): boolean {
+        const geoset = this.model.Geosets[batch.index];
+        return !!geoset && this.rendererData.geosetAlpha[batch.index] >= 1e-6 &&
+            (geoset.LevelOfDetail === undefined || geoset.LevelOfDetail === levelOfDetail) &&
+            !this.skipAnimatedMaskLayer(geoset.MaterialID, batch.layer) &&
+            this.getLayerAlpha(this.model.Materials[geoset.MaterialID].Layers[batch.layer]) >= 1e-6;
+    }
+
+    private assertInitialized (): void {
+        if (this.disposed) throw new Error('Renderer was destroyed');
+        if (!this.gl && !this.device) throw new Error('Initialize a graphics context before rendering');
+    }
+
+    private uploadTextureSource (path: string, source: TextureSource): void {
+        if (source.type === 'imageData') this.setTextureImageData(path, source.imageData);
+        else if (source.type === 'image') this.setTextureImage(path, source.image);
+        else if (source.type === 'dds') {
+            if (this.device) throw new Error('DDS loader sources require a WebGL context');
+            this.setTextureCompressedImage(path, source.format, source.buffer, source.info);
+        } else {
+            const blp = decodeBLP(source.buffer);
+            const level = textureMipLevel(blp.width, blp.height, blp.mipmaps.length, this.textureSizeLimit);
+            this.setTextureImageData(path, [getImageData(blp, level) as ImageData]);
+        }
+    }
+
+    private notifyTexturesChanged (): void {
+        this.textureListeners.forEach(listener => listener());
+    }
+
+    private initDrawOrder (): void {
+        const groups: DrawBatch[][] = [];
+        this.model.Geosets.forEach((geoset, index) => {
+            const material = this.model.Materials[geoset.MaterialID];
+            const batches: DrawBatch[] = [];
+            let skip = -1;
+            material.Layers.forEach((layer, layerIndex) => {
+                if (layerIndex === skip || (this.isHD && layerIndex > 0)) return;
+                const mask = this.replaceableMaskLayerIndex[geoset.MaterialID] ? this.resolveMaskLayerIndex(geoset.MaterialID, layerIndex) : null;
+                if (mask !== null && mask > layerIndex) skip = mask;
+                batches.push({kind: 'geoset', index, layer: layerIndex, priority: material.PriorityPlane || 0,
+                    opaque: (layer.FilterMode || 0) < FilterMode.Blend});
+            });
+            if (batches.length) groups.push(batches);
+        });
+        this.model.ParticleEmitters2.forEach((emitter, index) => groups.push([{kind: 'particle', index, layer: 0,
+            priority: emitter.PriorityPlane || 0, opaque: false}]));
+        this.model.RibbonEmitters.forEach((emitter, index) => groups.push([{kind: 'ribbon', index, layer: 0,
+            priority: this.model.Materials[emitter.MaterialID]?.PriorityPlane || 0, opaque: false}]));
+        // Sort complete material passes by their first layer; never split authored composition.
+        this.drawOrder = groups.map((batches, order) => ({batches, order})).sort((a, b) =>
+            Number(b.batches[0].opaque) - Number(a.batches[0].opaque) ||
+            a.batches[0].priority - b.batches[0].priority || a.order - b.order)
+            .flatMap(entry => entry.batches);
+    }
+
+    private getGeosetUVBuffer (index: number, coordId = 0): WebGLBuffer {
+        const coords = this.model.Geosets[index].TVertices[coordId];
+        if (!coords || coordId === 0) return this.texCoordBuffer[index];
+        const buffers = this.extraTexCoordBuffers[index] ||= [];
+        if (!buffers[coordId]) {
+            buffers[coordId] = this.gl.createBuffer();
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffers[coordId]);
+            this.gl.bufferData(this.gl.ARRAY_BUFFER, coords, this.gl.STATIC_DRAW);
+        }
+        return buffers[coordId];
+    }
+
+    private skipAnimatedMaskLayer (materialID: number, layerIndex: number): boolean {
+        if (this.isHD || this.replaceableMaskLayerIndex[materialID]) return false;
+        for (let previous = 0; previous < layerIndex; ++previous) {
+            if (this.resolveMaskLayerIndex(materialID, previous) === layerIndex) return true;
+        }
+        return false;
+    }
+
+    private getGeosetGPUUVBuffer (index: number, coordId = 0): GPUBuffer {
+        const coords = this.model.Geosets[index].TVertices[coordId];
+        if (!coords || coordId === 0) return this.gpuTexCoordBuffer[index];
+        const buffers = this.extraGPUTexCoordBuffers[index] ||= [];
+        if (!buffers[coordId]) {
+            const buffer = buffers[coordId] = this.device.createBuffer({label: `uv ${index}:${coordId}`,
+                size: coords.byteLength, usage: GPUBufferUsage.VERTEX, mappedAtCreation: true});
+            new Float32Array(buffer.getMappedRange()).set(coords);
+            buffer.unmap();
+        }
+        return buffers[coordId];
+    }
+
+    private restoreMeshAttributes (): void {
+        if (this.useVAO) return;
+        const locations = this.shaderProgramLocations;
+        for (const attribute of [locations.vertexPositionAttribute, locations.normalsAttribute, locations.textureCoordAttribute]) {
+            this.gl.enableVertexAttribArray(attribute);
+        }
+        if (this.isHD) {
+            for (const attribute of [locations.skinAttribute, locations.weightAttribute, locations.tangentAttribute]) this.gl.enableVertexAttribArray(attribute);
+        } else if (!this.softwareSkinning) this.gl.enableVertexAttribArray(locations.groupAttribute);
+    }
+
+    private markRendered (): void {
+        if (this.initialRenderComplete || this.initialRenderPending || this.getMissingTexturePaths().length) return;
+        this.initialRenderPending = true;
+        const completion = this.device ? this.device.queue.onSubmittedWorkDone() : waitForGL(this.gl, {timeoutMs: 30000});
+        completion.then(() => {
+            if (this.disposed) return;
+            this.initialRenderComplete = true;
+            this.renderedListeners.forEach(listener => listener.resolve());
+            this.renderedListeners.clear();
+        }, error => {
+            this.initialRenderPending = false;
+            this.renderedListeners.forEach(listener => listener.reject(error));
+            this.renderedListeners.clear();
+        });
+    }
+
     public setTextureCompressedImage (path: string, format: DDS_FORMAT, imageData: ArrayBuffer, ddsInfo: DdsInfo): void {
+        if (!ddsInfo.images.length) throw new Error('DDS contains no image levels');
+        if (!this.supportedCompressedFormats) {
+            this.gl.getExtension('WEBGL_compressed_texture_s3tc');
+            this.gl.getExtension('EXT_texture_compression_rgtc');
+            this.supportedCompressedFormats = new Set(this.gl.getParameter(this.gl.COMPRESSED_TEXTURE_FORMATS) as number[]);
+        }
+        if (!this.supportedCompressedFormats.has(format)) throw new Error('Compressed texture format is unsupported by this context');
+        if (this.textureSizeLimit && ddsInfo.images.length) {
+            const level = textureMipLevel(ddsInfo.images[0].shape.width, ddsInfo.images[0].shape.height, ddsInfo.images.length, this.textureSizeLimit);
+            ddsInfo = {...ddsInfo, images: ddsInfo.images.slice(level)};
+            if (Math.max(ddsInfo.images[0].shape.width, ddsInfo.images[0].shape.height) > this.textureSizeLimit) {
+                throw new Error('Compressed DDS needs an authored mip within the texture size limit');
+            }
+        }
+        this.textureDimensions.set(path, [ddsInfo.images[0].shape.width, ddsInfo.images[0].shape.height]);
         this.debugLogOnce(`texture-compressed:${path}`, 'Uploading compressed texture', {
             path,
             format,
@@ -1102,6 +1420,7 @@ export class ModelRenderer {
         const flags = this.model.Textures.find(it => it.Image === path)?.Flags || 0;
         this.setTextureParameters(flags, isWebGL2(this.gl), this.rendererData.textures[path]);
         this.processEnvMaps(path);
+            this.notifyTexturesChanged();
 
         this.gl.bindTexture(this.gl.TEXTURE_2D, null);
         this.debugGLErrorOnce(`texture-compressed-gl:${path}`, 'Compressed texture upload GL error', {
@@ -1144,6 +1463,7 @@ export class ModelRenderer {
         }
 
         this.processEnvMaps(path);
+            this.notifyTexturesChanged();
     }
 
     public setCamera (cameraPos: vec3, cameraQuat: quat): void {
@@ -1159,14 +1479,33 @@ export class ModelRenderer {
         vec3.copy(this.rendererData.lightColor, lightColor);
     }
 
+    /** Bright editor lighting by default; Unshaded layers always bypass it. */
+    public setLightingOptions ({ambient = 0.8, diffuse = 0.2}: {ambient?: number; diffuse?: number} = {}): void {
+        if (![ambient, diffuse].every(value => Number.isFinite(value) && value >= 0)) throw new Error('Lighting strengths must be non-negative');
+        this.ambientStrength = ambient;
+        this.diffuseStrength = diffuse;
+    }
+
     public setEnvironmentMapProcessingEnabled (enabled: boolean): void {
         this.environmentMapProcessingEnabled = enabled;
     }
 
     public setSequence (index: number): void {
+        if (this.model.Sequences.length && !this.model.Sequences[index]) throw new Error(`Invalid sequence ${index}`);
         this.rendererData.animation = index;
-        this.rendererData.animationInfo = this.model.Sequences[this.rendererData.animation];
+        this.rendererData.animationInfo = this.model.Sequences[index] || {Interval: new Uint32Array([0, 0])} as Sequence;
         this.rendererData.frame = this.rendererData.animationInfo.Interval[0];
+    }
+
+    /** Reset effect/global clocks and evaluate one fixed animation pose. No RAF loop is needed. */
+    public setPose (sequence = 0, offsetMs = 0): void {
+        if (!Number.isFinite(offsetMs) || offsetMs < 0) throw new Error('Pose offset must be non-negative');
+        this.setSequence(sequence);
+        this.rendererData.globalSequencesFrames.fill(0);
+        this.particlesController.reset();
+        this.ribbonsController.reset();
+        const interval = this.rendererData.animationInfo.Interval;
+        this.update(Math.min(offsetMs, interval[1] - interval[0]));
     }
 
     public getSequence (): number {
@@ -1272,12 +1611,14 @@ export class ModelRenderer {
         this.updateGlobalSequences(delta);
 
         this.updateNode(this.rendererData.rootNode);
+        evaluateLighting(this.lighting, this.rendererData, this.interp, this.ambientStrength, this.diffuseStrength);
 
         this.particlesController.update(delta);
         this.ribbonsController.update(delta);
 
         for (let i = 0; i < this.model.Geosets.length; ++i) {
             this.rendererData.geosetAlpha[i] = this.findAlpha(i);
+            this.updateGeosetColor(i);
         }
 
         // Static layer texture ids were resolved once in initLayerTextureAnimations(); only the
@@ -1309,6 +1650,8 @@ export class ModelRenderer {
         shadowSmoothingStep?: number;
         depthTextureTarget?: GPUTexture;
     }): void {
+        const sortedGeosets = new Set<number>();
+        const skinnedGeosets = this.softwareSkinning ? new Set<number>() : null;
         if (depthTextureTarget && !this.isHD) {
             return;
         }
@@ -1378,14 +1721,17 @@ export class ModelRenderer {
             }
             this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, VSUniformsValues);
 
-            for (let i = 0; i < this.model.Geosets.length; ++i) {
+            for (const batch of this.drawOrder) {
+                if (batch.kind !== 'geoset') {
+                    if (!depthTextureTarget) {
+                        if (batch.kind === 'particle') this.particlesController.renderGPU(pass, mvMatrix, pMatrix, batch.index);
+                        else this.ribbonsController.renderGPU(pass, mvMatrix, pMatrix, batch.index);
+                    }
+                    continue;
+                }
+                const i = batch.index;
                 const geoset = this.model.Geosets[i];
-                if (this.rendererData.geosetAlpha[i] < 1e-6) {
-                    continue;
-                }
-                if (geoset.LevelOfDetail !== undefined && geoset.LevelOfDetail !== levelOfDetail) {
-                    continue;
-                }
+                if (!this.isGeosetBatchVisible(batch, levelOfDetail)) continue;
 
                 this.ensureGeosetGPUBuffers(i);
 
@@ -1398,7 +1744,7 @@ export class ModelRenderer {
 
                 pass.setVertexBuffer(0, this.gpuVertexBuffer[i]);
                 pass.setVertexBuffer(1, this.gpuNormalBuffer[i]);
-                pass.setVertexBuffer(2, this.gpuTexCoordBuffer[i]);
+                pass.setVertexBuffer(2, this.getGeosetGPUUVBuffer(i, material.Layers[batch.layer].CoordId));
 
                 if (this.isHD) {
                     pass.setVertexBuffer(3, this.gpuTangentBuffer[i]);
@@ -1408,6 +1754,11 @@ export class ModelRenderer {
                     pass.setVertexBuffer(3, this.gpuGroupBuffer[i]);
                 }
 
+
+                if (!wireframe && !sortedGeosets.has(i) && material.RenderMode & MaterialRenderMode.SortPrimsFarZ) {
+                    this.device.queue.writeBuffer(this.gpuIndexBuffer[i], 0, sortedFaces(geoset, this.rendererData.nodes, mvMatrix));
+                    sortedGeosets.add(i);
+                }
                 pass.setIndexBuffer(wireframe ? this.wireframeIndexGPUBuffer[i] : this.gpuIndexBuffer[i], 'uint16');
 
                 if (this.isHD) {
@@ -1437,22 +1788,22 @@ export class ModelRenderer {
                     const irradianceMap = this.rendererData.gpuIrradianceMap[envTextureImage];
                     const prefilteredEnv = this.rendererData.gpuPrefilteredEnvMap[envTextureImage];
 
-                    const hasEnv = env && irradianceMap && prefilteredEnv;
+                    const hasEnv = useEnvironmentMap && irradianceMap && prefilteredEnv;
 
-                    this.gpuFSUniformsBuffers[materialID] ||= [];
-                    let gpuFSUniformsBuffer = this.gpuFSUniformsBuffers[materialID][0];
+                    this.gpuFSUniformsBuffers[i] ||= [];
+                    let gpuFSUniformsBuffer = this.gpuFSUniformsBuffers[i][0];
 
                     if (!gpuFSUniformsBuffer) {
-                        gpuFSUniformsBuffer = this.gpuFSUniformsBuffers[materialID][0] = this.device.createBuffer({
+                        gpuFSUniformsBuffer = this.gpuFSUniformsBuffers[i][0] = this.device.createBuffer({
                             label: `fs uniforms ${materialID}`,
-                            size: 192,
+                            size: 208,
                             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
                         });
                     }
 
                     const tVetexAnim = this.getTexCoordMatrix(baseLayer);
 
-                    const FSUniformsValues = new ArrayBuffer(192);
+                    const FSUniformsValues = new ArrayBuffer(208);
                     const FSUniformsViews = {
                         replaceableColor: new Float32Array(FSUniformsValues, 0, 3),
                         discardAlphaLevel: new Float32Array(FSUniformsValues, 12, 1),
@@ -1464,8 +1815,11 @@ export class ModelRenderer {
                         cameraPos: new Float32Array(FSUniformsValues, 96, 3),
                         shadowParams: new Float32Array(FSUniformsValues, 112, 3),
                         shadowMapLightMatrix: new Float32Array(FSUniformsValues, 128, 16),
+                        geosetColor: new Float32Array(FSUniformsValues, 192, 4),
                     };
                     FSUniformsViews.replaceableColor.set(this.rendererData.teamColor);
+                    FSUniformsViews.geosetColor.set(this.rendererData.geosetColor[i]);
+                    FSUniformsViews.geosetColor[3] = this.rendererData.geosetAlpha[i] * this.getLayerAlpha(baseLayer);
                     // FSUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
                     FSUniformsViews.discardAlphaLevel.set([this.getDiscardAlphaLevel(baseLayer.FilterMode)]);
                     FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(0, 3));
@@ -1562,6 +1916,7 @@ export class ModelRenderer {
                     pass.drawIndexed(wireframe ? geoset.Faces.length * 2 : geoset.Faces.length);
                 } else {
                     for (let j = 0; j < material.Layers.length; ++j) {
+                        if (j !== batch.layer) continue;
                         const layer = material.Layers[j];
                         const textureID = this.rendererData.materialLayerTextureID[materialID][j];
                         const texture = this.model.Textures[textureID];
@@ -1582,20 +1937,20 @@ export class ModelRenderer {
                         const pipeline = wireframe ? this.gpuWireframePipeline : this.getGPUPipeline(layer);
                         pass.setPipeline(pipeline);
 
-                        this.gpuFSUniformsBuffers[materialID] ||= [];
-                        let gpuFSUniformsBuffer = this.gpuFSUniformsBuffers[materialID][j];
+                        this.gpuFSUniformsBuffers[i] ||= [];
+                        let gpuFSUniformsBuffer = this.gpuFSUniformsBuffers[i][j];
 
                         if (!gpuFSUniformsBuffer) {
-                            gpuFSUniformsBuffer = this.gpuFSUniformsBuffers[materialID][j] = this.device.createBuffer({
+                            gpuFSUniformsBuffer = this.gpuFSUniformsBuffers[i][j] = this.device.createBuffer({
                                 label: `fs uniforms ${materialID} ${j}`,
-                                size: 80,
+                                size: 544,
                                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
                             });
                         }
 
                         const tVetexAnim = this.getTexCoordMatrix(layer);
 
-                        const FSUniformsValues = new ArrayBuffer(80);
+                        const FSUniformsValues = new ArrayBuffer(544);
                         const FSUniformsViews = {
                             replaceableColor: new Float32Array(FSUniformsValues, 0, 3),
                             replaceableType: new Uint32Array(FSUniformsValues, 12, 1),
@@ -1604,6 +1959,14 @@ export class ModelRenderer {
                             wireframe: new Uint32Array(FSUniformsValues, 24, 1),
                             useReplaceableMask: new Uint32Array(FSUniformsValues, 28, 1),
                             tVertexAnim: new Float32Array(FSUniformsValues, 32, 12),
+                            geosetColor: new Float32Array(FSUniformsValues, 80, 4),
+                            lighting: new Float32Array(FSUniformsValues, 96, 4),
+                            ambient: new Float32Array(FSUniformsValues, 112, 4),
+                            lightPos: new Float32Array(FSUniformsValues, 128, 4),
+                            lightColor: new Float32Array(FSUniformsValues, 144, 4),
+                            modelLightPositions: new Float32Array(FSUniformsValues, 160, 32),
+                            modelLightColors: new Float32Array(FSUniformsValues, 288, 32),
+                            modelLightAttenuation: new Float32Array(FSUniformsValues, 416, 32),
                         };
                         const maskTextureID = texture.ReplaceableId === 1 || texture.ReplaceableId === 2 ?
                             this.getReplaceableMaskTextureID(materialID, j) :
@@ -1627,6 +1990,15 @@ export class ModelRenderer {
                         FSUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
                         FSUniformsViews.discardAlphaLevel.set([this.getDiscardAlphaLevel(layer.FilterMode)]);
                         FSUniformsViews.layerAlpha.set([this.getLayerAlpha(layer)]);
+                        FSUniformsViews.geosetColor.set(this.rendererData.geosetColor[i]);
+                        FSUniformsViews.geosetColor[3] = this.rendererData.geosetAlpha[i];
+                        FSUniformsViews.lighting.set([this.diffuseStrength, layer.Shading & LayerShading.Unshaded ? 1 : 0, this.lighting.count, 0]);
+                        FSUniformsViews.ambient.set(this.lighting.ambient);
+                        FSUniformsViews.lightPos.set(this.rendererData.lightPos);
+                        FSUniformsViews.lightColor.set(this.rendererData.lightColor);
+                        FSUniformsViews.modelLightPositions.set(this.lighting.positions);
+                        FSUniformsViews.modelLightColors.set(this.lighting.colors);
+                        FSUniformsViews.modelLightAttenuation.set(this.lighting.attenuation);
                         FSUniformsViews.useReplaceableMask.set([maskTexture ? 1 : 0]);
                         FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(0, 3));
                         FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(3, 6), 4);
@@ -1669,13 +2041,13 @@ export class ModelRenderer {
                 }
             }
 
-            this.particlesController.renderGPU(pass, mvMatrix, pMatrix);
-            this.ribbonsController.renderGPU(pass, mvMatrix, pMatrix);
 
             pass.end();
 
             const commandBuffer = encoder.finish();
             this.device.queue.submit([commandBuffer]);
+
+            if (!depthTextureTarget) this.markRendered();
 
             return;
         }
@@ -1749,30 +2121,58 @@ export class ModelRenderer {
             this.gl.activeTexture(this.gl.TEXTURE6);
             this.gl.bindTexture(this.gl.TEXTURE_2D, this.brdfLUT);
             this.gl.uniform1i(this.shaderProgramLocations.brdfLUTUniform, 6);
+        } else {
+            this.gl.uniform3fv(this.shaderProgramLocations.ambientUniform, this.lighting.ambient);
+            this.gl.uniform3fv(this.shaderProgramLocations.lightPosUniform, this.rendererData.lightPos);
+            this.gl.uniform3fv(this.shaderProgramLocations.lightColorUniform, this.rendererData.lightColor);
+            if (this.glModelLightLimit) {
+                this.gl.uniform4fv(this.shaderProgramLocations.modelLightPositionsUniform, this.lighting.positions.subarray(0, this.glModelLightLimit * 4));
+                this.gl.uniform4fv(this.shaderProgramLocations.modelLightColorsUniform, this.lighting.colors.subarray(0, this.glModelLightLimit * 4));
+                this.gl.uniform4fv(this.shaderProgramLocations.modelLightAttenuationUniform, this.lighting.attenuation.subarray(0, this.glModelLightLimit * 4));
+            }
         }
 
-        for (let i = 0; i < this.model.Geosets.length; ++i) {
+        for (const batch of this.drawOrder) {
+            if (batch.kind !== 'geoset') {
+                if (this.useVAO) (this.gl as WebGL2RenderingContext).bindVertexArray(null);
+                if (batch.kind === 'particle') this.particlesController.render(mvMatrix, pMatrix, batch.index);
+                else this.ribbonsController.render(mvMatrix, pMatrix, batch.index);
+                this.gl.useProgram(this.shaderProgram);
+                this.resetGLStateCache();
+                this.restoreMeshAttributes();
+                continue;
+            }
+            const i = batch.index;
             const geoset = this.model.Geosets[i];
-            if (this.rendererData.geosetAlpha[i] < 1e-6) {
-                continue;
-            }
-            if (geoset.LevelOfDetail !== undefined && geoset.LevelOfDetail !== levelOfDetail) {
-                continue;
-            }
+            if (!this.isGeosetBatchVisible(batch, levelOfDetail)) continue;
 
             this.ensureGeosetBuffers(i);
 
-            if (this.softwareSkinning) {
+            const geosetColor = this.rendererData.geosetColor[i];
+            this.gl.uniform4f(this.shaderProgramLocations.geosetColorUniform,
+                geosetColor[0], geosetColor[1], geosetColor[2], this.rendererData.geosetAlpha[i]);
+
+            if (this.softwareSkinning && !skinnedGeosets.has(i)) {
                 this.generateGeosetVertices(i);
+                skinnedGeosets.add(i);
             }
 
             if (this.useVAO) {
                 (this.gl as WebGL2RenderingContext).bindVertexArray(this.vao[i]);
+                const uvBuffer = this.getGeosetUVBuffer(i, this.model.Materials[geoset.MaterialID].Layers[batch.layer].CoordId);
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, uvBuffer);
+                this.gl.vertexAttribPointer(this.shaderProgramLocations.textureCoordAttribute, 2, this.gl.FLOAT, false, 0, 0);
             }
 
             const materialID = geoset.MaterialID;
             const material = this.model.Materials[materialID];
 
+
+            if (!wireframe && !sortedGeosets.has(i) && material.RenderMode & MaterialRenderMode.SortPrimsFarZ) {
+                this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer[i]);
+                this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, sortedFaces(geoset, this.rendererData.nodes, mvMatrix), this.gl.DYNAMIC_DRAW);
+                sortedGeosets.add(i);
+            }
             // Shader_HD_DefaultUnit
             if (this.isHD) {
                 // Which layer carries the reflection texture depends only on the material, so it
@@ -1803,7 +2203,7 @@ export class ModelRenderer {
                     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.normalBuffer[i]);
                     this.gl.vertexAttribPointer(this.shaderProgramLocations.normalsAttribute, 3, this.gl.FLOAT, false, 0, 0);
 
-                    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.texCoordBuffer[i]);
+                    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.getGeosetUVBuffer(i, material.Layers[batch.layer].CoordId));
                     this.gl.vertexAttribPointer(this.shaderProgramLocations.textureCoordAttribute, 2, this.gl.FLOAT, false, 0, 0);
 
                     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.skinWeightBuffer[i]);
@@ -1834,11 +2234,8 @@ export class ModelRenderer {
                     });
                 }
             } else {
-                let skipLayerIndex = -1;
                 for (let j = 0; j < material.Layers.length; ++j) {
-                    if (j === skipLayerIndex) {
-                        continue;
-                    }
+                    if (j !== batch.layer) continue;
                     const textureID = this.rendererData.materialLayerTextureID[materialID][j];
                     const texture = this.model.Textures[textureID];
                     const maskLayerIndex = this.resolveMaskLayerIndex(materialID, j);
@@ -1857,9 +2254,6 @@ export class ModelRenderer {
                         });
                     }
                     this.setLayerProps(materialID, j, material.Layers[j], this.rendererData.materialLayerTextureID[materialID][j]);
-                    if (maskLayerIndex !== null && maskLayerIndex > j) {
-                        skipLayerIndex = maskLayerIndex;
-                    }
 
                     if (!this.useVAO) {
                         this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer[i]);
@@ -1868,7 +2262,7 @@ export class ModelRenderer {
                         this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.normalBuffer[i]);
                         this.gl.vertexAttribPointer(this.shaderProgramLocations.normalsAttribute, 3, this.gl.FLOAT, false, 0, 0);
 
-                        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.texCoordBuffer[i]);
+                        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.getGeosetUVBuffer(i, material.Layers[batch.layer].CoordId));
                         this.gl.vertexAttribPointer(this.shaderProgramLocations.textureCoordAttribute, 2, this.gl.FLOAT, false, 0, 0);
 
                         if (!this.softwareSkinning) {
@@ -1927,8 +2321,7 @@ export class ModelRenderer {
             }
         }
 
-        this.particlesController.render(mvMatrix, pMatrix);
-        this.ribbonsController.render(mvMatrix, pMatrix);
+        this.markRendered();
     }
 
     private renderEnvironmentGPU (pass: GPURenderPassEncoder, mvMatrix: mat4, pMatrix: mat4) {
@@ -2272,7 +2665,7 @@ export class ModelRenderer {
         this.gl.attachShader(shaderProgram, fragment);
         this.gl.linkProgram(shaderProgram);
 
-        checkProgram(this.gl, shaderProgram, [vertex, fragment]);
+        if (!checkProgram(this.gl, shaderProgram, [vertex, fragment])) throw new Error('Unable to link model shaders');
 
         this.gl.useProgram(shaderProgram);
 
@@ -2287,26 +2680,40 @@ export class ModelRenderer {
     private generateGeosetVertices (geosetIndex: number): void {
         const geoset: Geoset = this.model.Geosets[geosetIndex];
         const buffer = this.vertices[geosetIndex];
+        const normals = this.posedNormals[geosetIndex] ||= new Float32Array(geoset.Normals.length);
+        const matrices = this.softwareGroupMatrices[geosetIndex] ||= [];
+        const normalMatrices = this.softwareGroupNormals[geosetIndex] ||= [];
+        // Bone groups are shared by many vertices. Average and invert once per group.
+        for (let groupIndex = 0; groupIndex < geoset.Groups.length; ++groupIndex) {
+            const group = geoset.Groups[groupIndex];
+            const matrix = matrices[groupIndex] ||= mat4.create();
+            const normal = normalMatrices[groupIndex] ||= mat3.create();
+            matrix.fill(0);
+            for (const bone of group) {
+                const transform = this.rendererData.nodes[bone].matrix;
+                for (let j = 0; j < 16; ++j) matrix[j] += transform[j] / group.length;
+            }
+            if (!group.length) mat4.identity(matrix);
+            if (!mat3.normalFromMat4(normal, matrix)) mat3.identity(normal);
+        }
 
         for (let i = 0; i < buffer.length; i += 3) {
             const index = i / 3;
-            const group = geoset.Groups[geoset.VertexGroup[index]];
-
+            const groupIndex = geoset.VertexGroup[index];
             vec3.set(tempPos, geoset.Vertices[i], geoset.Vertices[i + 1], geoset.Vertices[i + 2]);
-            vec3.set(tempSum, 0, 0, 0);
-            for (let j = 0; j < group.length; ++j) {
-                vec3.add(
-                    tempSum, tempSum,
-                    vec3.transformMat4(tempVec3, tempPos, this.rendererData.nodes[group[j]].matrix)
-                );
-            }
-            vec3.scale(tempPos, tempSum, 1 / group.length);
+            if (matrices[groupIndex]) vec3.transformMat4(tempPos, tempPos, matrices[groupIndex]);
             buffer[i]     = tempPos[0];
             buffer[i + 1] = tempPos[1];
             buffer[i + 2] = tempPos[2];
+            vec3.set(tempPos, geoset.Normals[i], geoset.Normals[i + 1], geoset.Normals[i + 2]);
+            if (normalMatrices[groupIndex]) vec3.transformMat3(tempPos, tempPos, normalMatrices[groupIndex]);
+            vec3.normalize(tempPos, tempPos);
+            normals.set(tempPos, i);
         }
         this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer[geosetIndex]);
         this.gl.bufferData(this.gl.ARRAY_BUFFER, buffer, this.gl.DYNAMIC_DRAW);
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.normalBuffer[geosetIndex]);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, normals, this.gl.DYNAMIC_DRAW);
     }
 
     private setTextureParameters (flags: TextureFlags | 0, hasMipmaps: boolean, texture?: WebGLTexture) {
@@ -2349,6 +2756,7 @@ export class ModelRenderer {
     }
 
     private processEnvMaps (path: string): void {
+        const cacheKey = JSON.stringify([this.environmentMapNamespace, path, this.textureSizeLimit]);
         if (
             !this.environmentMapProcessingEnabled ||
             !this.rendererData.requiredEnvMaps[path] ||
@@ -2363,7 +2771,7 @@ export class ModelRenderer {
         // context. Nothing here depends on the model, so there is nothing to redo — and without
         // this check a second upload of the same path also leaked the previous cubemaps.
         if (this.gl && !this.device) {
-            const cached = sharedEnvMaps.get(this.gl)?.get(path);
+            const cached = sharedEnvMaps.get(this.gl)?.get(cacheKey);
             if (cached) {
                 this.rendererData.envTextures[path] = cached.envTexture;
                 this.rendererData.irradianceMap[path] = cached.irradianceMap;
@@ -2371,7 +2779,7 @@ export class ModelRenderer {
                 return;
             }
         } else if (this.device) {
-            const cached = sharedGPUEnvMaps.get(this.device)?.get(path);
+            const cached = sharedGPUEnvMaps.get(this.device)?.get(cacheKey);
             if (cached) {
                 this.rendererData.gpuEnvTextures[path] = cached.envTexture;
                 this.rendererData.gpuIrradianceMap[path] = cached.irradianceMap;
@@ -2896,13 +3304,13 @@ export class ModelRenderer {
         // Publish for every other renderer on this context. These outlive the renderer that
         // happened to build them, so destroy() deliberately leaves them alone.
         if (this.device) {
-            cacheFor(sharedGPUEnvMaps, this.device).set(path, {
+            cacheFor(sharedGPUEnvMaps, this.device).set(cacheKey, {
                 envTexture: this.rendererData.gpuEnvTextures[path],
                 irradianceMap: this.rendererData.gpuIrradianceMap[path],
                 prefilteredEnvMap: this.rendererData.gpuPrefilteredEnvMap[path]
             });
         } else {
-            cacheFor(sharedEnvMaps, this.gl).set(path, {
+            cacheFor(sharedEnvMaps, this.gl).set(cacheKey, {
                 envTexture: this.rendererData.envTextures[path],
                 irradianceMap: this.rendererData.irradianceMap[path],
                 prefilteredEnvMap: this.rendererData.prefilteredEnvMap[path]
@@ -2988,18 +3396,13 @@ export class ModelRenderer {
         if (this.isHD) {
             fragmentShaderSource = isWebGL2(this.gl) ? fragmentShaderHDNew : fragmentShaderHDOld;
         } else {
-            fragmentShaderSource = fragmentShader;
+            // The remaining fragment uniforms need at most fourteen vectors. Each light needs three.
+            this.glModelLightLimit = Math.max(0, Math.min(MAX_MODEL_LIGHTS,
+                Math.floor((this.gl.getParameter(this.gl.MAX_FRAGMENT_UNIFORM_VECTORS) - 14) / 3)));
+            fragmentShaderSource = `#define MAX_MODEL_LIGHTS ${this.glModelLightLimit}\n${fragmentShader}`;
         }
 
-        const vertex = this.vertexShader = getShader(this.gl, vertexShaderSource, this.gl.VERTEX_SHADER);
-        const fragment = this.fragmentShader = getShader(this.gl, fragmentShaderSource, this.gl.FRAGMENT_SHADER);
-
-        const shaderProgram = this.shaderProgram = this.gl.createProgram();
-        this.gl.attachShader(shaderProgram, vertex);
-        this.gl.attachShader(shaderProgram, fragment);
-        this.gl.linkProgram(shaderProgram);
-
-        checkProgram(this.gl, shaderProgram, [vertex, fragment]);
+        const shaderProgram = this.shaderProgram = getSharedProgram(this.gl, vertexShaderSource, fragmentShaderSource);
 
         this.gl.useProgram(shaderProgram);
 
@@ -3021,6 +3424,8 @@ export class ModelRenderer {
         this.shaderProgramLocations.samplerUniform = this.gl.getUniformLocation(shaderProgram, 'uSampler');
         this.shaderProgramLocations.maskSamplerUniform = this.gl.getUniformLocation(shaderProgram, 'uMaskSampler');
         this.shaderProgramLocations.replaceableColorUniform = this.gl.getUniformLocation(shaderProgram, 'uReplaceableColor');
+        this.shaderProgramLocations.lightPosUniform = this.gl.getUniformLocation(shaderProgram, 'uLightPos');
+        this.shaderProgramLocations.lightColorUniform = this.gl.getUniformLocation(shaderProgram, 'uLightColor');
         if (this.isHD) {
             this.shaderProgramLocations.normalSamplerUniform = this.gl.getUniformLocation(shaderProgram, 'uNormalSampler');
             this.shaderProgramLocations.ormSamplerUniform = this.gl.getUniformLocation(shaderProgram, 'uOrmSampler');
@@ -3040,6 +3445,12 @@ export class ModelRenderer {
             this.shaderProgramLocations.replaceableTypeUniform = this.gl.getUniformLocation(shaderProgram, 'uReplaceableType');
         }
         this.shaderProgramLocations.layerAlphaUniform = this.gl.getUniformLocation(shaderProgram, 'uLayerAlpha');
+        this.shaderProgramLocations.geosetColorUniform = this.gl.getUniformLocation(shaderProgram, 'uGeosetColor');
+        this.shaderProgramLocations.lightingUniform = this.gl.getUniformLocation(shaderProgram, 'uLighting');
+        this.shaderProgramLocations.ambientUniform = this.gl.getUniformLocation(shaderProgram, 'uAmbient');
+        this.shaderProgramLocations.modelLightPositionsUniform = this.gl.getUniformLocation(shaderProgram, 'uModelLightPositions[0]');
+        this.shaderProgramLocations.modelLightColorsUniform = this.gl.getUniformLocation(shaderProgram, 'uModelLightColors[0]');
+        this.shaderProgramLocations.modelLightAttenuationUniform = this.gl.getUniformLocation(shaderProgram, 'uModelLightAttenuation[0]');
         this.shaderProgramLocations.discardAlphaLevelUniform = this.gl.getUniformLocation(shaderProgram, 'uDiscardAlphaLevel');
         this.shaderProgramLocations.tVertexAnimUniform = this.gl.getUniformLocation(shaderProgram, 'uTVertexAnim');
         this.shaderProgramLocations.useReplaceableMaskUniform = this.gl.getUniformLocation(shaderProgram, 'uUseReplaceableMask');
@@ -3553,22 +3964,25 @@ export class ModelRenderer {
         });
     }
 
-    private createGPUPipelineByLayer (filterMode: FilterMode, twoSided: boolean) : GPURenderPipeline {
-        return this.createGPUPipeline(...GPU_LAYER_PROPS[filterMode], undefined, {
+    private createGPUPipelineByLayer (filterMode: FilterMode, shading: number) : GPURenderPipeline {
+        const [name, blend, depth] = GPU_LAYER_PROPS[filterMode];
+        return this.createGPUPipeline(name, blend, {...depth,
+            depthCompare: shading & LayerShading.NoDepthTest ? 'always' : depth.depthCompare,
+            depthWriteEnabled: shading & LayerShading.NoDepthSet ? false : depth.depthWriteEnabled}, undefined, {
             primitive: {
-                cullMode: twoSided ? 'none' : 'back'
+                cullMode: shading & LayerShading.TwoSided ? 'none' : 'back'
             }
         });
     }
 
     private getGPUPipeline (layer: Layer): GPURenderPipeline {
         const filterMode = layer.FilterMode || 0;
-        const twoSided = Boolean((layer.Shading || 0) & LayerShading.TwoSided);
+        const shading = (layer.Shading || 0) & (LayerShading.TwoSided | LayerShading.NoDepthTest | LayerShading.NoDepthSet);
 
-        const key = `${filterMode}-${twoSided}`;
+        const key = `${filterMode}-${shading}`;
 
         if (!this.gpuPipelines[key]) {
-            this.gpuPipelines[key] = this.createGPUPipelineByLayer(filterMode, twoSided);
+            this.gpuPipelines[key] = this.createGPUPipelineByLayer(filterMode, shading);
         }
 
         return this.gpuPipelines[key];
@@ -3596,7 +4010,7 @@ export class ModelRenderer {
                     buffer: {
                         type: 'uniform',
                         hasDynamicOffset: false,
-                        minBindingSize: 192
+                        minBindingSize: 208
                     }
                 },
                 {
@@ -3718,7 +4132,7 @@ export class ModelRenderer {
                     buffer: {
                         type: 'uniform',
                         hasDynamicOffset: false,
-                        minBindingSize: 80
+                        minBindingSize: 544
                     }
                 },
                 {
@@ -3906,8 +4320,8 @@ export class ModelRenderer {
             const size = Math.ceil(geoset.Faces.byteLength / 4) * 4;
             this.gpuIndexBuffer[i] = this.device.createBuffer({
                 label: `index ${i}`,
-                size: 2 * size,
-                usage: GPUBufferUsage.INDEX,
+                size,
+                usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
                 mappedAtCreation: true
             });
             new Uint16Array(
@@ -4203,7 +4617,8 @@ export class ModelRenderer {
         for (let i = 0; i < this.rendererData.globalSequencesFrames.length; ++i) {
             this.rendererData.globalSequencesFrames[i] += delta;
             if (this.rendererData.globalSequencesFrames[i] > this.model.GlobalSequences[i]) {
-                this.rendererData.globalSequencesFrames[i] = 0;
+                const duration = this.model.GlobalSequences[i];
+                this.rendererData.globalSequencesFrames[i] = duration > 0 ? this.rendererData.globalSequencesFrames[i] % duration : 0;
             }
         }
     }
@@ -4212,6 +4627,8 @@ export class ModelRenderer {
         const translationRes = this.interp.vec3(translation, node.node.Translation);
         const rotationRes = this.interp.quat(rotation, node.node.Rotation);
         const scalingRes = this.interp.vec3(scaling, node.node.Scaling);
+        const parent = this.rendererData.nodes[node.node.Parent];
+        const flags = node.node.Flags || 0;
 
         if (!translationRes && !rotationRes && !scalingRes) {
             mat4.identity(node.matrix);
@@ -4228,8 +4645,44 @@ export class ModelRenderer {
             );
         }
 
-        if (node.node.Parent || node.node.Parent === 0) {
-            mat4.mul(node.matrix, this.rendererData.nodes[node.node.Parent].matrix, node.matrix);
+        if (parent) {
+            const removeRotation = flags & NodeFlags.DontInheritRotation && !(flags & NodeFlags.Billboarded);
+            const removeScaling = flags & NodeFlags.DontInheritScaling;
+            if (removeRotation || removeScaling) {
+                // Filter the inherited linear transform before composing local animation.
+                // Compensating local TRS independently gives the wrong inverse order for R*S.
+                vec3.add(tempInheritedPivot, node.node.PivotPoint as vec3, translationRes || defaultTranslation);
+                vec3.transformMat4(tempInheritedPivot, tempInheritedPivot, parent.matrix);
+                mat4.getScaling(tempInheritedScale, parent.matrix);
+                mat4.identity(tempInheritedParent);
+                for (let column = 0; column < 3; ++column) {
+                    if (removeRotation) {
+                        tempInheritedParent[column * 5] = removeScaling ? 1 : tempInheritedScale[column];
+                    } else {
+                        const scale = tempInheritedScale[column];
+                        if (scale > 1e-8) for (let row = 0; row < 3; ++row) {
+                            tempInheritedParent[column * 4 + row] = parent.matrix[column * 4 + row] / scale;
+                        }
+                    }
+                }
+                mat4.mul(node.matrix, tempInheritedParent, node.matrix);
+                const pivot = node.node.PivotPoint;
+                for (let row = 0; row < 3; ++row) {
+                    // Keep the animated pivot attached to the parent independently of orientation.
+                    node.matrix[12 + row] = tempInheritedPivot[row] -
+                        node.matrix[row] * pivot[0] - node.matrix[4 + row] * pivot[1] - node.matrix[8 + row] * pivot[2];
+                }
+            } else mat4.mul(node.matrix, parent.matrix, node.matrix);
+            if (flags & NodeFlags.DontInheritTranslation) {
+                node.matrix[12] -= parent.matrix[12];
+                node.matrix[13] -= parent.matrix[13];
+                node.matrix[14] -= parent.matrix[14];
+            }
+        }
+        if (flags & NodeFlags.CameraAnchored) {
+            node.matrix[12] += this.rendererData.cameraPos[0];
+            node.matrix[13] += this.rendererData.cameraPos[1];
+            node.matrix[14] += this.rendererData.cameraPos[2];
         }
 
         const billboardedLock = node.node.Flags & NodeFlags.BillboardedLockX ||
@@ -4288,6 +4741,20 @@ export class ModelRenderer {
 
         for (const child of node.childs) {
             this.updateNode(child);
+        }
+    }
+
+    private updateGeosetColor (geosetId: number): void {
+        const out = this.rendererData.geosetColor[geosetId];
+        const anim = this.rendererData.geosetAnims[geosetId];
+        vec3.set(out, 1, 1, 1);
+        if (!anim || !(anim.Flags & GeosetAnimFlags.Color) || !anim.Color) {
+            return;
+        }
+        const color = anim.Color instanceof Float32Array ? anim.Color : this.interp.vec3(tempVec3, anim.Color);
+        if (color) {
+            // Model colors use BGR order; shaders expect RGB.
+            vec3.set(out, color[2], color[1], color[0]);
         }
     }
 
@@ -4507,6 +4974,8 @@ export class ModelRenderer {
     }
 
     private setLayerProps (materialID: number, layerIndex: number, layer: Layer, textureID: number): void {
+        this.gl.uniform4f(this.shaderProgramLocations.lightingUniform, this.diffuseStrength,
+            layer.Shading & LayerShading.Unshaded ? 1 : 0, Math.min(this.lighting.count, this.glModelLightLimit), 0);
         const texture = this.model.Textures[textureID];
         const maskTextureID = texture.ReplaceableId === 1 || texture.ReplaceableId === 2 ?
             this.getReplaceableMaskTextureID(materialID, layerIndex) :
@@ -4532,8 +5001,12 @@ export class ModelRenderer {
 
         this.applyLayerState(layer);
 
+        this.gl.activeTexture(this.gl.TEXTURE0);
+        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image] || this.rendererData.whiteTexture);
+        this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
+        this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, 0);
+
         if (texture.Image) {
-            this.gl.activeTexture(this.gl.TEXTURE0);
             const glTexture = this.rendererData.textures[texture.Image];
             if (!glTexture && this.debugEnabled) {
                 this.debugLogOnce(`sd-missing-bind:${materialID}:${layerIndex}:${texture.Image}`, 'Missing SD texture at bind', {
@@ -4544,9 +5017,6 @@ export class ModelRenderer {
                     loadedTextureCount: Object.keys(this.rendererData.textures).length,
                 });
             }
-            this.gl.bindTexture(this.gl.TEXTURE_2D, glTexture || this.whiteTexture);
-            this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
-            this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, 0);
         } else if (texture.ReplaceableId === 1 || texture.ReplaceableId === 2) {
             this.gl.uniform3fv(this.shaderProgramLocations.replaceableColorUniform, this.rendererData.teamColor);
             this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, texture.ReplaceableId);
@@ -4564,7 +5034,7 @@ export class ModelRenderer {
                 loadedTextureCount: Object.keys(this.rendererData.textures).length,
             });
         }
-        this.gl.bindTexture(this.gl.TEXTURE_2D, glMaskTexture || this.whiteTexture);
+        this.gl.bindTexture(this.gl.TEXTURE_2D, glMaskTexture || this.rendererData.whiteTexture);
         this.gl.uniform1i(this.shaderProgramLocations.maskSamplerUniform, 1);
         this.gl.uniform1f(this.shaderProgramLocations.useReplaceableMaskUniform, maskTexture ? 1 : 0);
         this.gl.uniform1f(this.shaderProgramLocations.layerAlphaUniform, this.getLayerAlpha(layer));
@@ -4576,6 +5046,7 @@ export class ModelRenderer {
 
     private setLayerPropsHD (materialID: number, layers: Layer[]): void {
         const baseLayer = layers[0];
+        this.gl.uniform1f(this.shaderProgramLocations.layerAlphaUniform, this.getLayerAlpha(baseLayer));
         const textures = this.rendererData.materialLayerTextureID[materialID];
         const normalTextres = this.rendererData.materialLayerNormalTextureID[materialID];
         const ormTextres = this.rendererData.materialLayerOrmTextureID[materialID];
@@ -4604,7 +5075,7 @@ export class ModelRenderer {
                 loadedTextureCount: Object.keys(this.rendererData.textures).length,
             });
         }
-        this.gl.bindTexture(this.gl.TEXTURE_2D, glDiffuseTexture || this.whiteTexture);
+        this.gl.bindTexture(this.gl.TEXTURE_2D, glDiffuseTexture || this.rendererData.whiteTexture);
         this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
 
 

@@ -20,6 +20,7 @@ export interface RendererData {
     // geoset-to-anim map
     geosetAnims: GeosetAnim[];
     geosetAlpha: number[];
+    geosetColor: vec3[];
     materialLayerTextureID: number[][];
     materialLayerNormalTextureID: number[][];
     materialLayerOrmTextureID: number[][];
@@ -32,6 +33,7 @@ export interface RendererData {
     shadowBias: number;
     shadowSmoothingStep: number;
     textures: {[key: string]: WebGLTexture};
+    whiteTexture: WebGLTexture;
     gpuTextures: {[key: string]: GPUTexture};
     gpuSamplers: GPUSampler[];
     gpuDepthSampler: GPUSampler;

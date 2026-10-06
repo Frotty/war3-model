@@ -1,11 +1,13 @@
 /// <reference types="vite/client" />
 /// <reference types="@webgpu/types" />
 
-import {getShader, checkProgram} from './util';
+import {getSharedProgram} from './util';
 import {RendererData} from './rendererData';
+import {VisibleBounds, expandBounds} from './geometry';
 import {ModelInterp} from './modelInterp';
 import {FilterMode, Layer, LayerShading, Material, RibbonEmitter} from '../model';
 import {mat4, vec3} from 'gl-matrix';
+import {textureAnimationMatrix} from './textureAnimation';
 import vertexShader from './shaders/webgl/ribbon.vs.glsl?raw';
 import fragmentShader from './shaders/webgl/ribbon.fs.glsl?raw';
 import ribbonShader from './shaders/webgpu/ribbons.wgsl?raw';
@@ -34,8 +36,6 @@ interface RibbonEmitterWrapper {
 export class RibbonsController {
     private gl: WebGL2RenderingContext | WebGLRenderingContext;
     private shaderProgram: WebGLProgram;
-    private vertexShader: WebGLShader;
-    private fragmentShader: WebGLShader;
 
     private device: GPUDevice;
     private gpuShaderModule: GPUShaderModule;
@@ -55,12 +55,14 @@ export class RibbonsController {
         replaceableColorUniform: WebGLUniformLocation | null,
         replaceableTypeUniform: WebGLUniformLocation | null,
         discardAlphaLevelUniform: WebGLUniformLocation | null,
-        colorUniform: WebGLUniformLocation | null
+        colorUniform: WebGLUniformLocation | null,
+        tVertexAnimUniform: WebGLUniformLocation | null
     };
 
     private interp: ModelInterp;
     private rendererData: RendererData;
     private emitters: RibbonEmitterWrapper[];
+    private elapsed = 0;
 
     constructor (interp: ModelInterp, rendererData: RendererData) {
         this.shaderProgramLocations = {
@@ -72,7 +74,8 @@ export class RibbonsController {
             replaceableColorUniform: null,
             replaceableTypeUniform: null,
             discardAlphaLevelUniform: null,
-            colorUniform: null
+            colorUniform: null,
+            tVertexAnimUniform: null
         };
 
         this.interp = interp;
@@ -111,17 +114,6 @@ export class RibbonsController {
 
     public destroy (): void {
         if (this.shaderProgram) {
-            if (this.vertexShader) {
-                this.gl.detachShader(this.shaderProgram, this.vertexShader);
-                this.gl.deleteShader(this.vertexShader);
-                this.vertexShader = null;
-            }
-            if (this.fragmentShader) {
-                this.gl.detachShader(this.shaderProgram, this.fragmentShader);
-                this.gl.deleteShader(this.fragmentShader);
-                this.fragmentShader = null;
-            }
-            this.gl.deleteProgram(this.shaderProgram);
             this.shaderProgram = null;
         }
         if (this.gpuVSUniformsBuffer) {
@@ -129,6 +121,12 @@ export class RibbonsController {
             this.gpuVSUniformsBuffer = null;
         }
         for (const emitter of this.emitters) {
+            if (this.gl) {
+                this.gl.deleteBuffer(emitter.vertexBuffer);
+                this.gl.deleteBuffer(emitter.texCoordBuffer);
+            }
+            emitter.vertexGPUBuffer?.destroy();
+            emitter.texCoordGPUBuffer?.destroy();
             for (const buffer of emitter.fsUnifrmsPerLayer) {
                 buffer.destroy();
             }
@@ -181,7 +179,7 @@ export class RibbonsController {
                     buffer: {
                     type: 'uniform',
                         hasDynamicOffset: false,
-                        minBindingSize: 48
+                        minBindingSize: 96
                     }
                 },
                 {
@@ -379,12 +377,37 @@ export class RibbonsController {
     }
 
     public update (delta: number): void {
+        this.elapsed += delta;
         for (const emitter of this.emitters) {
             this.updateEmitter(emitter, delta);
         }
     }
 
-    public render (mvMatrix: mat4, pMatrix: mat4): void {
+    public reset (): void {
+        this.elapsed = 0;
+        for (const emitter of this.emitters) {
+            emitter.creationTimes.length = 0;
+            emitter.emission = 0;
+        }
+    }
+
+    public expandBounds (bounds: VisibleBounds): void {
+        const point = vec3.create();
+        for (const emitter of this.emitters) {
+            if (!this.visibleEmitter(emitter)) continue;
+            for (let i = 0; i < emitter.creationTimes.length * 6; i += 3) {
+                vec3.set(point, emitter.vertices[i], emitter.vertices[i + 1], emitter.vertices[i + 2]);
+                expandBounds(bounds, point);
+            }
+        }
+    }
+
+    private visibleEmitter (emitter: RibbonEmitterWrapper): boolean {
+        return emitter.creationTimes.length >= 2 && this.interp.animVectorVal(emitter.props.Alpha, 1) > 1e-6 &&
+            this.rendererData.model.Materials[emitter.props.MaterialID].Layers.some(layer => this.interp.animVectorVal(layer.Alpha, 1) > 1e-6);
+    }
+
+    public render (mvMatrix: mat4, pMatrix: mat4, emitterIndex?: number): void {
         if (!this.emitters.length) {
             return;
         }
@@ -398,20 +421,21 @@ export class RibbonsController {
         this.gl.enableVertexAttribArray(this.shaderProgramLocations.textureCoordAttribute);
 
         for (const emitter of this.emitters) {
-            if (emitter.creationTimes.length < 2) {
+            if (emitterIndex !== undefined && emitter.index !== emitterIndex) continue;
+            if (!this.visibleEmitter(emitter)) {
                 continue;
             }
-
-            this.gl.uniform4f(
-                this.shaderProgramLocations.colorUniform,
-                emitter.props.Color[0], emitter.props.Color[1], emitter.props.Color[2],
-                this.interp.animVectorVal(emitter.props.Alpha, 1)
-            );
 
             this.setGeneralBuffers(emitter);
             const materialID: number = emitter.props.MaterialID;
             const material: Material = this.rendererData.model.Materials[materialID];
             for (let j = 0; j < material.Layers.length; ++j) {
+                const color = emitter.props.Color || new Float32Array([1, 1, 1]);
+                const layerAlpha = this.interp.animVectorVal(material.Layers[j].Alpha, 1);
+                if (layerAlpha < 1e-6) continue;
+                this.gl.uniform4f(this.shaderProgramLocations.colorUniform,
+                    color[2] * layerAlpha, color[1] * layerAlpha, color[0] * layerAlpha,
+                    this.interp.animVectorVal(emitter.props.Alpha, 1) * layerAlpha);
                 this.setLayerProps(material.Layers[j], this.rendererData.materialLayerTextureID[materialID][j]);
                 this.renderEmitter(emitter);
             }
@@ -421,7 +445,7 @@ export class RibbonsController {
         this.gl.disableVertexAttribArray(this.shaderProgramLocations.textureCoordAttribute);
     }
 
-    public renderGPU (pass: GPURenderPassEncoder, mvMatrix: mat4, pMatrix: mat4): void {
+    public renderGPU (pass: GPURenderPassEncoder, mvMatrix: mat4, pMatrix: mat4, emitterIndex?: number): void {
         if (!this.emitters.length) {
             return;
         }
@@ -436,7 +460,8 @@ export class RibbonsController {
         this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, VSUniformsValues);
 
         for (const emitter of this.emitters) {
-            if (emitter.creationTimes.length < 2) {
+            if (emitterIndex !== undefined && emitter.index !== emitterIndex) continue;
+            if (!this.visibleEmitter(emitter)) {
                 continue;
             }
 
@@ -455,32 +480,34 @@ export class RibbonsController {
                 const textureID = this.rendererData.materialLayerTextureID[materialID][j];
                 const texture = this.rendererData.model.Textures[textureID];
                 const layer = material.Layers[j];
+                const layerAlpha = this.interp.animVectorVal(layer.Alpha, 1);
+                if (layerAlpha < 1e-6) continue;
 
                 const pipeline = this.gpuPipelines[layer.FilterMode] || this.gpuPipelines[0];
                 pass.setPipeline(pipeline);
 
-                const fsUniformsValues = new ArrayBuffer(48);
+                const fsUniformsValues = new ArrayBuffer(96);
                 const fsUniformsViews = {
                     replaceableColor: new Float32Array(fsUniformsValues, 0, 3),
                     replaceableType: new Uint32Array(fsUniformsValues, 12, 1),
                     discardAlphaLevel: new Float32Array(fsUniformsValues, 16, 1),
                     color: new Float32Array(fsUniformsValues, 32, 4),
+                    tVertexAnim: new Float32Array(fsUniformsValues, 48, 12),
                 };
 
                 fsUniformsViews.replaceableColor.set(this.rendererData.teamColor);
                 fsUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
                 fsUniformsViews.discardAlphaLevel.set([layer.FilterMode === FilterMode.Transparent ? .75 : 0]);
-                fsUniformsViews.color.set([
-                    emitter.props.Color[0],
-                    emitter.props.Color[1],
-                    emitter.props.Color[2],
-                    this.interp.animVectorVal(emitter.props.Alpha, 1)
-                ]);
+                const color = emitter.props.Color || new Float32Array([1, 1, 1]);
+                fsUniformsViews.color.set([color[2] * layerAlpha, color[1] * layerAlpha, color[0] * layerAlpha,
+                    this.interp.animVectorVal(emitter.props.Alpha, 1) * layerAlpha]);
+                const texAnim = textureAnimationMatrix(this.interp, this.rendererData.model, layer);
+                for (let row = 0; row < 3; ++row) fsUniformsViews.tVertexAnim.set(texAnim.slice(row * 3, row * 3 + 3), row * 4);
 
                 if (!emitter.fsUnifrmsPerLayer[j]) {
                     emitter.fsUnifrmsPerLayer[j] = this.device.createBuffer({
                         label: `ribbons fs uniforms ${emitter.index} layer ${j}`,
-                        size: 48,
+                        size: 96,
                         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
                     });
                 }
@@ -515,15 +542,7 @@ export class RibbonsController {
     }
 
     private initShaders (): void {
-        const vertex = this.vertexShader = getShader(this.gl, vertexShader, this.gl.VERTEX_SHADER);
-        const fragment = this.fragmentShader = getShader(this.gl, fragmentShader, this.gl.FRAGMENT_SHADER);
-
-        const shaderProgram = this.shaderProgram = this.gl.createProgram();
-        this.gl.attachShader(shaderProgram, vertex);
-        this.gl.attachShader(shaderProgram, fragment);
-        this.gl.linkProgram(shaderProgram);
-
-        checkProgram(this.gl, shaderProgram, [vertex, fragment]);
+        const shaderProgram = this.shaderProgram = getSharedProgram(this.gl, vertexShader, fragmentShader);
 
         this.gl.useProgram(shaderProgram);
 
@@ -543,6 +562,7 @@ export class RibbonsController {
             this.gl.getUniformLocation(shaderProgram, 'uDiscardAlphaLevel');
         this.shaderProgramLocations.colorUniform =
             this.gl.getUniformLocation(shaderProgram, 'uColor');
+        this.shaderProgramLocations.tVertexAnimUniform = this.gl.getUniformLocation(shaderProgram, 'uTVertexAnim');
     }
 
     private resizeEmitterBuffers (emitter: RibbonEmitterWrapper, size: number): void {
@@ -587,8 +607,18 @@ export class RibbonsController {
     }
 
     private updateEmitter (emitter: RibbonEmitterWrapper, delta: number): void {
-        const now = Date.now();
-        const visibility = this.interp.animVectorVal(emitter.props.Visibility, 0);
+        const now = this.elapsed;
+        const visibility = this.interp.animVectorVal(emitter.props.Visibility, 1);
+
+        // Apply gravity to existing points only. A frozen update(0) must not move the trail.
+        const gravity = emitter.props.Gravity || 0;
+        for (let i = 0; i < emitter.creationTimes.length; ++i) {
+            const age = (now - emitter.creationTimes[i]) / 1000;
+            const previousAge = Math.max(0, age - delta / 1000);
+            const fall = 0.5 * gravity * (age * age - previousAge * previousAge);
+            emitter.vertices[i * 6 + 2] -= fall;
+            emitter.vertices[i * 6 + 5] -= fall;
+        }
 
         if (visibility > 0) {
             const emissionRate = emitter.props.EmissionRate;
@@ -610,7 +640,7 @@ export class RibbonsController {
         }
 
         if (emitter.creationTimes.length) {
-            while (emitter.creationTimes[0] + emitter.props.LifeSpan * 1000 < now) {
+            while (emitter.creationTimes.length && emitter.creationTimes[0] + emitter.props.LifeSpan * 1000 < now) {
                 emitter.creationTimes.shift();
                 for (let i = 0; i + 6 + 5 < emitter.vertices.length; i += 6) {
                     emitter.vertices[i]     = emitter.vertices[i + 6];
@@ -655,7 +685,7 @@ export class RibbonsController {
             const textureSlot = this.interp.animVectorVal(emitter.props.TextureSlot, 0);
 
             const texCoordX = textureSlot % emitter.props.Columns;
-            const texCoordY = Math.floor(textureSlot / emitter.props.Rows);
+            const texCoordY = Math.floor(textureSlot / emitter.props.Columns);
             const cellWidth = 1 / emitter.props.Columns;
             const cellHeight = 1 / emitter.props.Rows;
 
@@ -669,6 +699,8 @@ export class RibbonsController {
     }
 
     private setLayerProps (layer: Layer, textureID: number): void {
+        this.gl.uniformMatrix3fv(this.shaderProgramLocations.tVertexAnimUniform, false,
+            textureAnimationMatrix(this.interp, this.rendererData.model, layer));
         const texture = this.rendererData.model.Textures[textureID];
 
         if (layer.Shading & LayerShading.TwoSided) {
@@ -720,10 +752,11 @@ export class RibbonsController {
             this.gl.depthMask(false);
         }
 
+        this.gl.activeTexture(this.gl.TEXTURE0);
+        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image] || this.rendererData.whiteTexture);
+        this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
+        this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, 0);
         if (texture.Image) {
-            this.gl.activeTexture(this.gl.TEXTURE0);
-            this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image]);
-            this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
             this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, 0);
         } else if (texture.ReplaceableId === 1 || texture.ReplaceableId === 2) {
             this.gl.uniform3fv(this.shaderProgramLocations.replaceableColorUniform, this.rendererData.teamColor);
@@ -737,28 +770,6 @@ export class RibbonsController {
             this.gl.depthMask(false);
         }
 
-        /*if (typeof layer.TVertexAnimId === 'number') {
-            let anim: TVertexAnim = this.rendererData.model.TextureAnims[layer.TVertexAnimId];
-            let translationRes = this.interp.vec3(translation, anim.Translation);
-            let rotationRes = this.interp.quat(rotation, anim.Rotation);
-            let scalingRes = this.interp.vec3(scaling, anim.Scaling);
-            mat4.fromRotationTranslationScale(
-                texCoordMat4,
-                rotationRes || defaultRotation,
-                translationRes || defaultTranslation,
-                scalingRes || defaultScaling
-            );
-            mat3.set(
-                texCoordMat3,
-                texCoordMat4[0], texCoordMat4[1], 0,
-                texCoordMat4[4], texCoordMat4[5], 0,
-                texCoordMat4[12], texCoordMat4[13], 0
-            );
-
-            this.gl.uniformMatrix3fv(this.shaderProgramLocations.tVertexAnimUniform, false, texCoordMat3);
-        } else {
-            this.gl.uniformMatrix3fv(this.shaderProgramLocations.tVertexAnimUniform, false, identifyMat3);
-        }*/
     }
 
     private setGeneralBuffers (emitter: RibbonEmitterWrapper): void {

@@ -6,3 +6,7 @@ export {generate as generateMDX} from './mdx/generate';
 export * as blp from './blp/blpimage';
 export {decode as decodeBLP, getImageData as getBLPImageData} from './blp/decode';
 export {ModelRenderer} from './renderer/modelRenderer';
+export {renderModelThumbnail, fitThumbnailCamera, ThumbnailSession} from './renderer/thumbnail';
+export type {ThumbnailOptions, ThumbnailResult, ThumbnailCamera, ThumbnailSessionOptions} from './renderer/thumbnail';
+export type {TextureLoader, TextureSource} from './renderer/textureLoader';
+export type {VisibleBounds} from './renderer/geometry';

@@ -1,0 +1,189 @@
+<!doctype html><meta charset="utf-8"><title>Model renderer verification</title>
+<style>body{background:#20242b;color:#ddd;font:14px monospace}img{background:#777;margin:10px;border:1px solid #aaa}pre{white-space:pre-wrap}</style>
+<pre id="status">Running browser verification...</pre><div id="images"></div>
+<script type="module">
+import {parseMDL, ModelRenderer, renderModelThumbnail, fitThumbnailCamera, ThumbnailSession} from '/index.ts';
+import sdGPU from '/renderer/shaders/webgpu/sd.wgsl?raw';
+import hdGPU from '/renderer/shaders/webgpu/hd.wgsl?raw';
+import depthGPU from '/renderer/shaders/webgpu/depth.wgsl?raw';
+import ribbonGPU from '/renderer/shaders/webgpu/ribbons.wgsl?raw';
+import {mat4} from '/node_modules/gl-matrix/esm/index.js';
+const status = document.querySelector('#status');
+const report = [];
+function check(value, message) {if (!value) throw new Error(message); report.push(message);}
+const source = `Version { FormatVersion 800, } Model "test" { BlendTime 150, }
+Sequences 1 { Anim "Stand" { Interval { 0, 1000 }, } }
+Textures 1 { Bitmap { Image "test.blp", } }
+Materials 1 { Material { Layer { FilterMode Blend, TwoSided, static TextureID 0, } } }
+Geoset { Vertices 3 { { -1, -1, 0 }, { 1, -1, 0 }, { 0, 1, 0 }, }
+Normals 3 { { 0, 0, -1 }, { 0, 0, -1 }, { 0, 0, -1 }, }
+TVertices 3 { { 0, 0 }, { 1, 0 }, { 0.5, 1 }, } VertexGroup { 0, 0, 0, }
+Faces 1 3 { Triangles { { 0, 1, 2 }, } } Groups 1 1 { Matrices { 0 }, }
+MinimumExtent { -5000, -5000, -5000 }, MaximumExtent { 5000, 5000, 5000 }, BoundsRadius 5000, MaterialID 0, SelectionGroup 0, }
+Bone "root" { ObjectId 0, GeosetId 0, GeosetAnimId None, } PivotPoints 1 { { 0, 0, 0 }, }`;
+const white = {type:'imageData', imageData:[new ImageData(new Uint8ClampedArray([255,255,255,255]),1,1)]};
+async function show(result, title) { const img = new Image(); img.src = URL.createObjectURL(result.blob); img.title=title;
+    await img.decode(); document.querySelector('#images').append(img); return img; }
+async function rgba(result) {const img=await show(result,'synthetic'); const canvas=document.createElement('canvas');
+    canvas.width=result.width; canvas.height=result.height;const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0);return ctx.getImageData(0,0,canvas.width,canvas.height).data;}
+try {
+ const model=parseMDL(source);
+ const options={width:128,height:96,loadTexture:async()=>white,cameraDirection:[0,0,1]};
+ const lit=await renderModelThumbnail(model,options);
+ check(lit.blob.size>100,'PNG capture succeeds at requested resolution');
+ const a=await rgba(lit); let count=0,max=0;
+ for(let i=0;i<a.length;i+=4){if(a[i+3]>200){count++;max=Math.max(max,a[i]);}}
+ check(count>2000,'Visible framing ignores oversized authored extents');
+ check(max>190&&max<250,'Bright SD lighting is applied to normally shaded layers');
+ model.Materials[0].Layers[0].Shading|=1;
+ const unshaded=await renderModelThumbnail(model,options);const b=await rgba(unshaded);
+ check(Math.max(...b.filter((v,i)=>i%4===0))===255,'Unshaded bypasses lighting');
+ const priorityModel=parseMDL(source);
+ priorityModel.Materials[0].PriorityPlane=5;priorityModel.Materials[0].Layers[0].FilterMode=0;
+ priorityModel.Materials[0].Layers[0].Shading=209;
+ priorityModel.Materials.push({PriorityPlane:-5,Layers:[{...priorityModel.Materials[0].Layers[0],FilterMode:1}]});
+ priorityModel.Geosets.push({...priorityModel.Geosets[0],MaterialID:1});
+ priorityModel.GeosetAnims=[{GeosetId:0,Flags:2,Alpha:1,Color:new Float32Array([0,0,1])},
+  {GeosetId:1,Flags:2,Alpha:1,Color:new Float32Array([0,1,0])}];
+ const priorityCapture=await renderModelThumbnail(priorityModel,options);const priorityPixels=await rgba(priorityCapture);
+ const priorityCenter=(48*128+64)*4;
+ check(priorityPixels[priorityCenter]>200&&priorityPixels[priorityCenter+1]<10,
+  'Opaque and alpha-tested priority planes order overlapping no-depth layers');
+ const maskedModel=parseMDL(source);maskedModel.Textures.push({Image:'',ReplaceableId:1,Flags:0});
+ maskedModel.Materials[0].Layers.unshift({FilterMode:2,Shading:17,TextureID:1,
+  Alpha:{Frames:new Uint32Array([0,500]),Values:new Float32Array([0,1]),VectorSize:1,LineType:0,GlobalSeqId:null}});
+ const maskedCapture=await renderModelThumbnail(maskedModel,options);const maskedPixels=await rgba(maskedCapture);
+ check(maskedCapture.frame>=500&&maskedPixels.some((value,index)=>index%4===3&&value>200),
+  'Mask-only opacity does not prevent the thumbnail visible-frame search');
+ const limitCanvas=document.createElement('canvas');limitCanvas.width=1;limitCanvas.height=1;
+ const limitGL=limitCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
+ const limitParameter=limitGL.getParameter.bind(limitGL);let assetLoads=0;
+ for(const [parameter, value] of [[limitGL.MAX_RENDERBUFFER_SIZE,32],[limitGL.MAX_VIEWPORT_DIMS,new Int32Array([64,16])]]) {
+  limitGL.getParameter=pname=>pname===parameter?value:limitParameter(pname);
+  let rejected=false;
+  try{await renderModelThumbnail(model,{...options,width:24,height:16,canvas:limitCanvas,
+   loadTexture:async()=>{assetLoads++;return white;}});}catch(error){rejected=/context limits/.test(error.message);}
+  check(rejected&&assetLoads===0&&limitCanvas.width===1&&limitCanvas.height===1,
+   'Device backing-size limits reject before resize or loading assets: '+parameter);
+ }
+ limitGL.getParameter=limitParameter;
+ Object.defineProperty(limitGL,'drawingBufferWidth',{configurable:true,get:()=>1});
+ let backingRejected=false;try{await renderModelThumbnail(model,{...options,width:16,height:16,canvas:limitCanvas,
+  loadTexture:async()=>{assetLoads++;return white;}});}catch(error){backingRejected=/drawing buffer/.test(error.message);}
+ check(backingRejected&&assetLoads===0,'An undersized drawing buffer rejects instead of encoding a blank PNG');
+ delete limitGL.drawingBufferWidth;
+ limitGL.getExtension('WEBGL_lose_context')?.loseContext();
+ for(const [uniformBudget, expectedLights] of [[16,0],[20,2],[128,8]]) {
+  const legacyCanvas=document.createElement('canvas');legacyCanvas.width=64;legacyCanvas.height=64;
+  const legacyGL=legacyCanvas.getContext('webgl',{preserveDrawingBuffer:true});
+  const getParameter=legacyGL.getParameter.bind(legacyGL);
+  legacyGL.getParameter=pname=>pname===legacyGL.MAX_FRAGMENT_UNIFORM_VECTORS?uniformBudget:getParameter(pname);
+  const legacyRenderer=new ModelRenderer(parseMDL(source));legacyRenderer.setEnvironmentMapProcessingEnabled(false);
+  legacyRenderer.initGL(legacyGL);await legacyRenderer.loadTextures(async()=>white);legacyRenderer.setPose(0,1);
+  const legacyCamera=fitThumbnailCamera(legacyRenderer.getVisibleBounds(),64,64,[0,0,1]);
+  legacyRenderer.setCamera(legacyCamera.position,legacyCamera.rotation);
+  await legacyRenderer.renderAsync(legacyCamera.view,legacyCamera.projection);
+  let lightArraySize=0;
+  for(let i=0;i<legacyGL.getProgramParameter(legacyRenderer.shaderProgram,legacyGL.ACTIVE_UNIFORMS);i++) {
+   const uniform=legacyGL.getActiveUniform(legacyRenderer.shaderProgram,i);
+   if(uniform.name==='uModelLightPositions[0]')lightArraySize=uniform.size;
+  }
+  check(lightArraySize===expectedLights&&legacyGL.getError()===legacyGL.NO_ERROR,
+   `WebGL1 SD links and draws within a ${uniformBudget}-vector fragment budget (${expectedLights} lights)`);
+  legacyRenderer.destroy();ModelRenderer.releaseSharedResources(legacyGL);legacyGL.getExtension('WEBGL_lose_context')?.loseContext();
+ }
+ const warmCanvas=document.createElement('canvas');
+ const warmGL=warmCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
+ let programs=0;const createProgram=warmGL.createProgram.bind(warmGL);
+ warmGL.createProgram=()=>{programs++;return createProgram();};
+ const session=new ThumbnailSession({canvas:warmCanvas});let loads=0;
+ const pixels=new Uint8ClampedArray(16*16*4).fill(255);
+ const warm={width:64,height:64,maxTextureSize:8,loadTexture:async()=>{loads++;return {type:'imageData',imageData:[new ImageData(pixels,16,16)]};}};
+ await Promise.all([session.render(model,warm),session.render(model,warm)]);
+ check(loads===1,'Warm session serializes captures and reuses uploaded textures');
+ check(programs===1,'Warm captures compile the mesh program only once');
+ check(session.getCacheStats().estimatedBytes===Math.ceil(8*8*4*4/3),'Texture cap reduces actual upload dimensions');
+ await session.render(model,{...warm,textureNamespace:'another-archive'});
+ check(loads===2,'Archive namespaces avoid texture cache collisions');
+ await session.clearTextures();await session.render(model,warm);
+ check(loads===3,'Clearing the warm cache reloads textures');await session.destroy();warmGL.getExtension('WEBGL_lose_context')?.loseContext();
+ const freshSession=new ThumbnailSession();await freshSession.clearTextures();await freshSession.render(model,warm);await freshSession.destroy();
+ report.push('Clearing a fresh session preserves capture context settings');
+ const tinySession=new ThumbnailSession({maxCachedTextureBytes:1});await tinySession.render(model,warm);
+ check(tinySession.getCacheStats().textures===0,'Cache budget evicts oversized textures');await tinySession.destroy();
+ const ribbonModel=parseMDL(source);ribbonModel.Geosets=[];
+ const ribbon={ObjectId:1,Parent:0,Flags:0,PivotPoint:new Float32Array(3),
+  Translation:{Frames:new Uint32Array([0,1000]),Values:new Float32Array([-1,0,0,1,0,0]),VectorSize:3,LineType:1,GlobalSeqId:null},
+  HeightAbove:0.5,HeightBelow:0.5,Color:new Float32Array([0,1,0]),Alpha:1,LifeSpan:2,
+  EmissionRate:30,Rows:1,Columns:1,TextureSlot:0,MaterialID:0,Gravity:0};
+ ribbonModel.Nodes.push(ribbon);ribbonModel.RibbonEmitters=[ribbon];
+ const ribbonImage=await renderModelThumbnail(ribbonModel,{...options,warmupMs:500});
+ const ribbonPixels=await rgba(ribbonImage);
+ check(ribbonPixels.some((value,index)=>index%4===3&&value>100),'Warmed ribbons retain their GL buffers and render visible pixels');
+ check(Math.abs(ribbonImage.frame-501)<0.01,'Effect warmup starts at the requested initial pose');
+ const fallbackRibbon=await renderModelThumbnail(ribbonModel,{...options,warmupMs:500,allowMissingTextures:true,
+  loadTexture:async()=>{throw new Error('Unavailable effect texture');}});
+ const fallbackPixels=await rgba(fallbackRibbon);
+ check(fallbackRibbon.missingTextures.length===1&&fallbackPixels.some((value,index)=>index%4===1&&value>100),
+  'Missing ribbon textures use the white fallback and retain their tint');
+ const particleModel=parseMDL(source);particleModel.Geosets=[];
+ const particle={ObjectId:1,Parent:0,Flags:1048576,PivotPoint:new Float32Array(3),TextureID:0,
+  Speed:0,Variation:0,Latitude:0,Gravity:0,EmissionRate:30,Width:0,Length:0,LifeSpan:2,
+  FrameFlags:1,FilterMode:0,Rows:1,Columns:1,Time:0.5,TailLength:0,
+  SegmentColor:[new Float32Array([0,1,0]),new Float32Array([0,1,0]),new Float32Array([0,1,0])],
+  Alpha:new Uint8Array([255,255,255]),ParticleScaling:new Float32Array([1,1,1]),
+  LifeSpanUVAnim:new Uint32Array([0,0,1]),DecayUVAnim:new Uint32Array([0,0,1]),
+  TailUVAnim:new Uint32Array([0,0,1]),TailDecayUVAnim:new Uint32Array([0,0,1])};
+ particleModel.Nodes.push(particle);particleModel.ParticleEmitters2=[particle];
+ const fallbackParticle=await renderModelThumbnail(particleModel,{...options,warmupMs:500,allowMissingTextures:true,
+  loadTexture:async()=>{throw new Error('Unavailable effect texture');}});
+ const particlePixels=await rgba(fallbackParticle);
+ check(fallbackParticle.missingTextures.length===1&&particlePixels.some((value,index)=>index%4===1&&value>100),
+  'Missing ParticleEmitter2 textures use the same white fallback and retain their tint');
+ const ddsProbe=document.createElement('canvas').getContext('webgl2');
+ if(ddsProbe.getSupportedExtensions().includes('WEBGL_compressed_texture_s3tc')) {
+  const ddsImage=await renderModelThumbnail(model,{...options,maxTextureSize:4,loadTexture:async()=>({type:'dds',format:0x83F0,
+   buffer:new Uint8Array([224,7,0,0,0,0,0,0]).buffer,
+   info:{format:'dxt1',shape:{width:4,height:4},images:[{offset:0,length:8,shape:{width:4,height:4}}]}})});
+  const ddsPixels=await rgba(ddsImage);check(ddsPixels.some((value,index)=>index%4===1&&value>200),
+   'DDS loader enables compression on its internal context and uploads green DXT1 pixels');
+ }
+ ddsProbe.getExtension('WEBGL_lose_context')?.loseContext();
+ const adapter=await navigator.gpu?.requestAdapter();
+ if(adapter){const device=await adapter.requestDevice();for(const [name,source] of Object.entries({sdGPU,hdGPU,depthGPU,ribbonGPU})){
+  const code=source.replaceAll('${MAX_NODES}','254').replaceAll('${MAX_ENV_MIP_LEVELS}','5.0'); const module=device.createShaderModule({code});const info=await module.getCompilationInfo();
+  check(!info.messages.some(m=>m.type==='error'),name+' compiles: '+JSON.stringify(info.messages.map(m=>({message:m.message,line:m.lineNum,type:m.type}))));}
+  device.pushErrorScope('validation');
+  const gpuCanvas=document.createElement('canvas');gpuCanvas.width=64;gpuCanvas.height=64;
+  const context=gpuCanvas.getContext('webgpu');context.configure({device,format:navigator.gpu.getPreferredCanvasFormat(),alphaMode:'premultiplied'});
+  const gpuRenderer=new ModelRenderer(model);await gpuRenderer.initGPUDevice(gpuCanvas,device,context);await gpuRenderer.loadTextures(async()=>white);
+  gpuRenderer.setPose(0,1);const gpuCamera=fitThumbnailCamera(gpuRenderer.getVisibleBounds(),64,64,[0,0,1]);
+  gpuRenderer.setCamera(gpuCamera.position,gpuCamera.rotation);await gpuRenderer.renderAsync(gpuCamera.view,gpuCamera.projection);
+  const gpuError=await device.popErrorScope();check(!gpuError,'WebGPU SD pipeline draws without validation errors: '+gpuError?.message);
+  gpuRenderer.destroy();device.destroy();}
+ else report.push('WebGPU adapter unavailable; WebGL2 runtime verified');
+ const canvas=document.createElement('canvas');canvas.width=128;canvas.height=128;
+ const gl=canvas.getContext('webgl2',{preserveDrawingBuffer:true});
+ const renderer=new ModelRenderer(model);renderer.setEnvironmentMapProcessingEnabled(false);renderer.initGL(gl);
+ let ready=false;const readyPromise=renderer.whenReady({timeoutMs:10000}).then(()=>ready=true);
+ let rendered=false;const renderedPromise=renderer.whenRendered({timeoutMs:10000}).then(()=>rendered=true);
+ renderer.update(0);renderer.render(mat4.create(),mat4.create(),{});await new Promise(r=>setTimeout(r,10));
+ check(!ready&&!rendered,'Readiness does not resolve on incomplete placeholder draws');
+ await renderer.loadTextures(async()=>white);await readyPromise;
+ renderer.setPose(0,1);const camera=fitThumbnailCamera(renderer.getVisibleBounds(),128,128,[0,0,1]);
+ await renderer.renderAsync(camera.view,camera.projection);await renderedPromise;
+ check(rendered&&renderer.getFrame()===1,'First complete draw is awaited with frozen animation time');
+ check(gl.getError()===gl.NO_ERROR,'WebGL draws finish without driver errors');renderer.destroy();gl.getExtension('WEBGL_lose_context')?.loseContext();
+ const fixtures=new URLSearchParams(location.search);
+ if(fixtures.has('mdl')&&fixtures.has('blp')) {
+ const azerite=parseMDL(await (await fetch(fixtures.get('mdl'))).text());
+ const blp=await (await fetch(fixtures.get('blp'))).arrayBuffer();
+ const loadTexture=async(texture)=>{if(/Azerite01\.blp$/i.test(texture.Image))return{type:'blp',buffer:blp};throw new Error('Not supplied: '+texture.Image);};
+ let rejected=false;try{await renderModelThumbnail(azerite,{width:256,height:256,loadTexture});}catch(error){rejected=/Missing textures/.test(error.message);}
+ check(rejected,'Incomplete Azerite texture set rejects strict thumbnail capture');
+ for(const sequence of [0,1,2]) {const result=await renderModelThumbnail(azerite,{width:256,height:256,loadTexture,allowMissingTextures:true,sequence,frameOffsetMs:sequence===0?1:500});
+   check(result.missingTextures.length===4,'Azerite reports all four unavailable DDS textures');await show(result,azerite.Sequences[sequence].Name);}
+ }
+ status.textContent='PASS\n'+report.join('\n');document.body.dataset.result='pass';
+}catch(error){status.textContent='FAIL\n'+error.stack+'\n'+report.join('\n');document.body.dataset.result='fail';}
+</script>

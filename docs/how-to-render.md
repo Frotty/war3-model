@@ -52,3 +52,72 @@ function tick(timestamp: number) {
 This doc missing a lot of nuances, but the basic plan should be more clear now.
 
 For detailed info please see [example source](https://github.com/4eb0da/war3-model/blob/master/docs/preview/preview.ts)
+
+## Awaiting a complete frame
+
+Initialize the renderer before loading textures. `loadTextures` calls your resolver once per unique nonempty model texture path and accepts decoded `imageData`, an HTML `image`, a `blp` buffer, or compressed `dds` data. The resolver handles archive paths and replaceable texture lookup in your application. Failed or missing textures reject by default.
+
+```ts
+renderer.initGL(gl);
+await renderer.loadTextures(async texture => ({
+    type: 'blp',
+    buffer: await resolveModelTexture(texture.Image),
+}), {timeoutMs: 15000});
+renderer.setPose(0, 1); // evaluate 1ms after sequence start and reset effect/global clocks
+await renderer.renderAsync(view, projection, {timeoutMs: 15000});
+```
+
+`setPose` and `renderAsync` do not schedule animation. Continue calling `update(delta)` to play, or stop calling it to keep the pose frozen. `whenReady()` also works with manual `setTextureImage*` uploads. `whenRendered()` resolves after the first texture-complete draw finishes on the GPU; the consumer must keep its render loop running until then. Both support `signal` and `timeoutMs`, and pending waits reject when the renderer is destroyed. `renderAsync` waits for the particular draw it submits.
+
+## Cached thumbnails
+
+```ts
+import {renderModelThumbnail} from 'war3-model';
+
+const thumbnail = await renderModelThumbnail(model, {
+    width: 256,
+    height: 256,
+    loadTexture: async texture => ({
+        type: 'blp',
+        buffer: await resolveModelTexture(texture.Image),
+    }),
+    timeoutMs: 15000,
+});
+// Cache thumbnail.blob (PNG); display with URL.createObjectURL and revoke it later.
+```
+
+The helper defaults to Stand, evaluates 1ms after its start, waits for textures and GPU completion, fits posed visible mesh vertices and live effects, and downsamples a 2× render into the exact requested dimensions. Authored extents, unused vertices, hidden geosets and other LODs do not control framing. If the initial pose is empty, it searches the chosen sequence. Use `frameOffsetMs` for a specific pose and `warmupMs` to build particles or trails; particle-only models generally need warmup. Bounds are geometric: transparent texels and offscreen fragment effects are not measured.
+
+Optional settings include `sequence`, `cameraDirection` (Z up), `padding`, `background`, `supersampling`, `teamColor`, and `levelOfDetail`. Texture loading is strict by default; `allowMissingTextures: true` permits fallbacks and returns the unavailable paths in `missingTextures`. `useEnvironmentMap` defaults to false for fast editor captures. Model lights use bright SD defaults; `setLightingOptions({ambient, diffuse})` tunes an existing renderer, and Unshaded layers bypass lighting.
+
+For a thumbnail batch, pass a reusable thumbnail-only WebGL2 `canvas` created with `preserveDrawingBuffer: true`, and await each capture before reusing it. Concurrent captures on separate canvases are supported. Captures release their own textures and model buffers. Call `ModelRenderer.releaseSharedResources(gl)` when disposing a reused context. Thumbnail generation requires browser canvas/WebGL2 support and supports cancellation via `signal`.
+
+### Keeping thumbnail textures warm
+
+`ThumbnailSession` owns a reusable context, queues captures, and retains a bounded LRU cache of uploaded GPU textures. Mesh and effect shader programs are shared per context too. It skips file loading, BLP decoding and GPU upload on a cache hit.
+
+```ts
+import {ThumbnailSession} from 'war3-model';
+
+const session = new ThumbnailSession({maxCachedTextureBytes: 64 * 1024 * 1024});
+const result = await session.render(model, {
+    width: 128, height: 128,
+    loadTexture: resolveTexture,
+    textureNamespace: archiveId,
+    maxTextureSize: 256,
+});
+// Repeated captures retain shared textures until LRU eviction or explicit cleanup.
+console.log(session.getCacheStats());
+await session.clearTextures(); // invalidate changed assets
+await session.destroy();
+```
+
+Use the same `textureNamespace` for models sharing the same asset archive/root, and different namespaces when identical paths can resolve to different files. Cache identity includes path, wrap flags and texture cap. Changing texture contents under the same identity requires `clearTextures`. The default cache budget is 64 MiB, conservatively accounting as RGBA with mipmaps. A texture exceeding the budget is rendered but not retained. Each call's resolver is used only on misses; simultaneous calls to a session are queued.
+
+The namespace and texture cap also isolate derived environment maps when they are enabled. `clearTextures` invalidates those derived images as well, while keeping programs warm. The LRU budget counts source image textures; optional derived environment maps are separate shared resources. Other renderers sharing a context can call `setEnvironmentMapNamespace(archiveId)` before uploading environment textures, and `ModelRenderer.releaseSharedEnvironmentMaps(gl)` to invalidate derived images.
+
+Thumbnail texture resolution defaults to a maximum edge of 512 pixels; set `maxTextureSize: 0` for full resolution. BLP/DDS sources select an existing smaller mip before upload (BLP also avoids decoding the large mip). Image sources are resized when needed. Compressed DDS without a sufficiently small authored mip rejects rather than exceeding the cap. `renderer.setTextureSizeLimit(256)` applies the same policy to subsequent manual or async uploads for inline previews; ordinary renderers default to original resolution.
+
+For quick previews, use low texture caps, skip environment processing before initialization with `setEnvironmentMapProcessingEnabled(false)`, and render with `useEnvironmentMap: false`. Full viewers can keep original textures and enable environment maps. Existing geometry, UVs, animation, material flags and sorting are retained in both configurations.
+
+Run `npm run build-lib && npm test`, `npm run typecheck`, and `npm run lint` for regressions. For actual GPU/canvas checks, run `npm run dev` and open `/test/browser-renderer.html`. It checks PNG pixels, framing, shading, warm-cache reuse/eviction, texture resizing, readiness, WGSL compilation and a WebGPU SD draw when an adapter is available. Optional `?mdl=/_build/Azerite01.mdl&blp=/_build/Azerite01.blp` checks the supplied Azerite fixture after copying those assets into the ignored `_build` directory.

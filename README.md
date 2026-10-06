@@ -69,12 +69,14 @@ New versions 900 (not sure), 1000 and 1100 are supported in parsers, generators 
 * Global sequences
 * Alpha blending and multiple layers
 * TextureAnimation
-* Billboarded/BillboardedLockXYZ, w/o DontInherit/CameraAnchored
-* RibbonEmitter (w/o Gravity and TextureSlot/Color animation)
+* Billboarded/BillboardedLockXYZ, DontInherit, CameraAnchored
+* RibbonEmitter with gravity, animated texture slots, layer alpha and texture animation (animated ribbon color remains unsupported)
 * ParticleEmitter2 (with Tail/Head/Both/Squirt(?))
 * Reforged PBR lightning (orm textures, specular, normal mapping, env textures, etc)
-* No Light nodes support (Light, Unshaded, etc)
-* No render priority support (PriorityPlane and others)
+* Bright SD lighting with Light nodes and Unshaded layers
+* PriorityPlane ordering across meshes, particles and ribbons; SortPrimsFarZ mesh triangles and particles
+* Layer UV-set selection, geoset color and alpha animation
+* Async texture readiness, GPU draw completion and fitted PNG thumbnails
 * BLP / DDS are supported
 
 ## BLP support

@@ -14,6 +14,7 @@ struct FSUniforms {
     cameraPos: vec3f,
     shadowParams: vec3f,
     shadowMapLightMatrix: mat4x4f,
+    geosetColor: vec4f,
     // env
 }
 
@@ -78,6 +79,7 @@ struct FSOut {
 ) -> FSOut {
     let texCoord: vec2f = (fsUniforms.tVertexAnim * vec3f(in.textureCoord.x, in.textureCoord.y, 1.)).xy;
     var baseColor: vec4f = textureSample(fsUniformDiffuseTexture, fsUniformDiffuseSampler, texCoord);
+    baseColor.a *= fsUniforms.geosetColor.a;
 
     // hand-made alpha-test
     if (baseColor.a < fsUniforms.discardAlphaLevel) {
