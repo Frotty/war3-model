@@ -1,6 +1,7 @@
 precision mediump float;
 
 varying vec3 vNormal;
+varying vec3 vFragPos;
 varying vec2 vTextureCoord;
 
 uniform sampler2D uSampler;
@@ -8,6 +9,14 @@ uniform sampler2D uMaskSampler;
 uniform vec3 uReplaceableColor;
 uniform float uReplaceableType;
 uniform float uLayerAlpha;
+uniform vec4 uGeosetColor;
+uniform vec4 uLighting;
+uniform vec3 uAmbient;
+uniform vec3 uLightPos;
+uniform vec3 uLightColor;
+uniform vec4 uModelLightPositions[8];
+uniform vec4 uModelLightColors[8];
+uniform vec4 uModelLightAttenuation[8];
 uniform float uDiscardAlphaLevel;
 uniform mat3 uTVertexAnim;
 uniform float uUseReplaceableMask;
@@ -54,6 +63,22 @@ void main(void) {
     }
 
     gl_FragColor *= uLayerAlpha;
+    gl_FragColor *= uGeosetColor;
+    if (uLighting.y < 0.5) {
+        vec3 normal = normalize(vNormal + vec3(0., 0., 0.000001));
+        vec3 light = uAmbient;
+        if (uLighting.z < 0.5) light += uLightColor * uLighting.x * max(dot(normal, normalize(uLightPos - vFragPos)), 0.);
+        for (int i = 0; i < 8; ++i) {
+            if (float(i) >= uLighting.z) break;
+            vec3 delta = uModelLightPositions[i].xyz - vFragPos;
+            float distance = length(delta);
+            vec3 direction = uModelLightPositions[i].w > 0.5 ? delta / max(distance, 0.000001) : uModelLightPositions[i].xyz;
+            vec2 attenuation = uModelLightAttenuation[i].xy;
+            float weight = uModelLightPositions[i].w > 0.5 ? clamp((attenuation.y - distance) / max(attenuation.y - attenuation.x, 0.000001), 0., 1.) : 1.;
+            light += uModelLightColors[i].rgb * weight * max(dot(normal, direction), 0.);
+        }
+        gl_FragColor.rgb *= clamp(light, vec3(0.), vec3(1.5));
+    }
 
     // A negative threshold means "discard near-black texels" for additive color-keyed effects.
     if (uDiscardAlphaLevel < 0.) {

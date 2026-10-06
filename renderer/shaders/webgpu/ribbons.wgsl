@@ -8,6 +8,7 @@ struct FSUniforms {
     replaceableType: u32,
     discardAlphaLevel: f32,
     color: vec4f,
+    tVertexAnim: mat3x3f,
 }
 
 @group(0) @binding(0) var<uniform> vsUniforms: VSUniforms;
@@ -52,7 +53,7 @@ fn hypot(z: vec2f) -> f32 {
 @fragment fn fs(
     in: VSOut
 ) -> @location(0) vec4f {
-    let texCoord: vec2f = in.textureCoord;
+    let texCoord: vec2f = (fsUniforms.tVertexAnim * vec3f(in.textureCoord, 1.)).xy;
     var color: vec4f = vec4f(0.0);
 
     if (fsUniforms.replaceableType == 0) {

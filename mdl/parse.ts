@@ -722,6 +722,7 @@ function parseGeosetAnim (state: State, model: Model): void {
                 res.Alpha = parseAnimVector(state, AnimVectorType.FLOAT1);
             }
         } else if (keyword === 'Color') {
+            res.Flags |= GeosetAnimFlags.Color;
             if (isStatic) {
                 const array = new Float32Array(3);
                 res.Color = parseArray(state, array, 0) as Float32Array;

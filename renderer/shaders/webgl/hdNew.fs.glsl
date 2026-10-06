@@ -15,6 +15,8 @@ uniform sampler2D uNormalSampler;
 uniform sampler2D uOrmSampler;
 uniform vec3 uReplaceableColor;
 uniform float uDiscardAlphaLevel;
+uniform float uLayerAlpha;
+uniform vec4 uGeosetColor;
 uniform mat3 uTVertexAnim;
 uniform vec3 uLightPos;
 uniform vec3 uLightColor;
@@ -195,6 +197,7 @@ void main(void) {
     color = pow(color, vec3(1. / gamma));
 
     FragColor = vec4(color, baseColor.a);
+    FragColor *= vec4(uGeosetColor.rgb, uGeosetColor.a * uLayerAlpha);
 
     // hand-made alpha-test
     if (FragColor[3] < uDiscardAlphaLevel) {

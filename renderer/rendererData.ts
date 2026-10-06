@@ -20,6 +20,7 @@ export interface RendererData {
     // geoset-to-anim map
     geosetAnims: GeosetAnim[];
     geosetAlpha: number[];
+    geosetColor: vec3[];
     materialLayerTextureID: number[][];
     materialLayerNormalTextureID: number[][];
     materialLayerOrmTextureID: number[][];

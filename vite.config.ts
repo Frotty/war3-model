@@ -25,7 +25,10 @@ function emitBrowserDts(): Plugin {
     blp,
     decodeBLP,
     getBLPImageData,
-    ModelRenderer
+    ModelRenderer,
+    renderModelThumbnail,
+    fitThumbnailCamera,
+    ThumbnailSession
 } from './war3-model.d.ts';
 
 declare global {
@@ -40,6 +43,9 @@ declare global {
             decodeBLP: typeof decodeBLP;
             getBLPImageData: typeof getBLPImageData;
             ModelRenderer: typeof ModelRenderer;
+            renderModelThumbnail: typeof renderModelThumbnail;
+            fitThumbnailCamera: typeof fitThumbnailCamera;
+            ThumbnailSession: typeof ThumbnailSession;
         };
     }
 }

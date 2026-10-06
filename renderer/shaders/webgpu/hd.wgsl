@@ -16,6 +16,7 @@ struct FSUniforms {
     cameraPos: vec3f,
     shadowParams: vec3f,
     shadowMapLightMatrix: mat4x4f,
+    geosetColor: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> vsUniforms: VSUniforms;
@@ -163,6 +164,7 @@ fn fresnelSchlickRoughness(lightFactor: f32, f0: vec3f, roughness: f32) -> vec3f
 
     let texCoord: vec2f = (fsUniforms.tVertexAnim * vec3f(in.textureCoord.x, in.textureCoord.y, 1.)).xy;
     var baseColor: vec4f = textureSample(fsUniformDiffuseTexture, fsUniformDiffuseSampler, texCoord);
+    baseColor.a *= fsUniforms.geosetColor.a;
 
     // hand-made alpha-test
     if (baseColor.a < fsUniforms.discardAlphaLevel) {
@@ -283,5 +285,5 @@ fn fresnelSchlickRoughness(lightFactor: f32, f0: vec3f, roughness: f32) -> vec3f
     color = color / (vec3f(1) + color);
     color = pow(color, vec3f(1 / gamma));
 
-    return vec4f(color, baseColor.a);
+    return vec4f(color * fsUniforms.geosetColor.rgb, baseColor.a);
 }

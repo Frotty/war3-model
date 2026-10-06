@@ -12,6 +12,14 @@ struct FSUniforms {
     wireframe: u32,
     useReplaceableMask: u32,
     tVertexAnim: mat3x3f,
+    geosetColor: vec4f,
+    lighting: vec4f,
+    ambient: vec4f,
+    lightPos: vec4f,
+    lightColor: vec4f,
+    modelLightPositions: array<vec4f, 8>,
+    modelLightColors: array<vec4f, 8>,
+    modelLightAttenuation: array<vec4f, 8>,
 }
 
 @group(0) @binding(0) var<uniform> vsUniforms: VSUniforms;
@@ -32,6 +40,7 @@ struct VSOut {
     @builtin(position) position: vec4f,
     @location(0) normal: vec3f,
     @location(1) textureCoord: vec2f,
+    @location(2) worldPosition: vec3f,
 }
 
 @vertex fn vs(
@@ -39,28 +48,36 @@ struct VSOut {
 ) -> VSOut {
     var position: vec4f = vec4f(in.vertexPosition, 1.0);
     var count: i32 = 1;
-    var sum: vec4f = vsUniforms.nodesMatrices[in.group[0]] * position;
+    var skin = vsUniforms.nodesMatrices[in.group[0]];
 
     if (in.group[1] < ${MAX_NODES}) {
-        sum += vsUniforms.nodesMatrices[in.group[1]] * position;
+        skin += vsUniforms.nodesMatrices[in.group[1]];
         count += 1;
     }
     if (in.group[2] < ${MAX_NODES}) {
-        sum += vsUniforms.nodesMatrices[in.group[2]] * position;
+        skin += vsUniforms.nodesMatrices[in.group[2]];
         count += 1;
     }
     if (in.group[3] < ${MAX_NODES}) {
-        sum += vsUniforms.nodesMatrices[in.group[3]] * position;
+        skin += vsUniforms.nodesMatrices[in.group[3]];
         count += 1;
     }
-    sum /= f32(count);
-    sum.w = 1.;
-    position = sum;
+    skin *= 1.0 / f32(count);
+    position = skin * position;
+    position.w = 1.;
 
     var out: VSOut;
     out.position = vsUniforms.pMatrix * vsUniforms.mvMatrix * position;
     out.textureCoord = in.textureCoord;
+    let cof0 = cross(skin[1].xyz, skin[2].xyz);
+    let cof1 = cross(skin[2].xyz, skin[0].xyz);
+    let cof2 = cross(skin[0].xyz, skin[1].xyz);
+    let determinant = dot(skin[0].xyz, cof0);
     out.normal = in.normal;
+    if (abs(determinant) > 0.000001) {
+        out.normal = (cof0 * in.normal.x + cof1 * in.normal.y + cof2 * in.normal.z) / determinant;
+    }
+    out.worldPosition = position.xyz;
     return out;
 }
 
@@ -110,6 +127,27 @@ fn hypot(z: vec2f) -> f32 {
     }
 
     color *= fsUniforms.layerAlpha;
+    color *= fsUniforms.geosetColor;
+    if (fsUniforms.lighting.y < 0.5) {
+        let normal = normalize(in.normal + vec3f(0., 0., 0.000001));
+        var light = fsUniforms.ambient.rgb;
+        if (fsUniforms.lighting.z < 0.5) {
+            light += fsUniforms.lightColor.rgb * fsUniforms.lighting.x * max(dot(normal, normalize(fsUniforms.lightPos.xyz - in.worldPosition)), 0.);
+        }
+        for (var i: u32 = 0; i < u32(fsUniforms.lighting.z); i++) {
+            let delta = fsUniforms.modelLightPositions[i].xyz - in.worldPosition;
+            let distance = length(delta);
+            var direction = fsUniforms.modelLightPositions[i].xyz;
+            var weight = 1.;
+            if (fsUniforms.modelLightPositions[i].w > 0.5) {
+                direction = delta / max(distance, 0.000001);
+                let attenuation = fsUniforms.modelLightAttenuation[i].xy;
+                weight = clamp((attenuation.y - distance) / max(attenuation.y - attenuation.x, 0.000001), 0., 1.);
+            }
+            light += fsUniforms.modelLightColors[i].rgb * weight * max(dot(normal, direction), 0.);
+        }
+        color = vec4f(color.rgb * clamp(light, vec3f(0.), vec3f(1.5)), color.a);
+    }
 
     // A negative threshold means "discard near-black texels" for additive color-keyed effects.
     if (fsUniforms.discardAlphaLevel < 0.0) {

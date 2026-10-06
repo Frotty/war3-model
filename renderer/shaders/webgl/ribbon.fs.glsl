@@ -7,6 +7,7 @@ uniform vec3 uReplaceableColor;
 uniform float uReplaceableType;
 uniform float uDiscardAlphaLevel;
 uniform vec4 uColor;
+uniform mat3 uTVertexAnim;
 
 float hypot (vec2 z) {
     float t;
@@ -19,7 +20,7 @@ float hypot (vec2 z) {
 }
 
 void main(void) {
-    vec2 coords = vec2(vTextureCoord.s, vTextureCoord.t);
+    vec2 coords = (uTVertexAnim * vec3(vTextureCoord, 1.)).xy;
     if (uReplaceableType == 0.) {
         gl_FragColor = texture2D(uSampler, coords);
     } else if (uReplaceableType == 1.) {

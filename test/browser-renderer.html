@@ -1,0 +1,95 @@
+<!doctype html><meta charset="utf-8"><title>Model renderer verification</title>
+<style>body{background:#20242b;color:#ddd;font:14px monospace}img{background:#777;margin:10px;border:1px solid #aaa}pre{white-space:pre-wrap}</style>
+<pre id="status">Running browser verification...</pre><div id="images"></div>
+<script type="module">
+import {parseMDL, ModelRenderer, renderModelThumbnail, fitThumbnailCamera, ThumbnailSession} from '/index.ts';
+import sdGPU from '/renderer/shaders/webgpu/sd.wgsl?raw';
+import hdGPU from '/renderer/shaders/webgpu/hd.wgsl?raw';
+import depthGPU from '/renderer/shaders/webgpu/depth.wgsl?raw';
+import ribbonGPU from '/renderer/shaders/webgpu/ribbons.wgsl?raw';
+import {mat4} from '/node_modules/gl-matrix/esm/index.js';
+const status = document.querySelector('#status');
+const report = [];
+function check(value, message) {if (!value) throw new Error(message); report.push(message);}
+const source = `Version { FormatVersion 800, } Model "test" { BlendTime 150, }
+Sequences 1 { Anim "Stand" { Interval { 0, 1000 }, } }
+Textures 1 { Bitmap { Image "test.blp", } }
+Materials 1 { Material { Layer { FilterMode Blend, TwoSided, static TextureID 0, } } }
+Geoset { Vertices 3 { { -1, -1, 0 }, { 1, -1, 0 }, { 0, 1, 0 }, }
+Normals 3 { { 0, 0, -1 }, { 0, 0, -1 }, { 0, 0, -1 }, }
+TVertices 3 { { 0, 0 }, { 1, 0 }, { 0.5, 1 }, } VertexGroup { 0, 0, 0, }
+Faces 1 3 { Triangles { { 0, 1, 2 }, } } Groups 1 1 { Matrices { 0 }, }
+MinimumExtent { -5000, -5000, -5000 }, MaximumExtent { 5000, 5000, 5000 }, BoundsRadius 5000, MaterialID 0, SelectionGroup 0, }
+Bone "root" { ObjectId 0, GeosetId 0, GeosetAnimId None, } PivotPoints 1 { { 0, 0, 0 }, }`;
+const white = {type:'imageData', imageData:[new ImageData(new Uint8ClampedArray([255,255,255,255]),1,1)]};
+async function show(result, title) { const img = new Image(); img.src = URL.createObjectURL(result.blob); img.title=title;
+    await img.decode(); document.querySelector('#images').append(img); return img; }
+async function rgba(result) {const img=await show(result,'synthetic'); const canvas=document.createElement('canvas');
+    canvas.width=result.width; canvas.height=result.height;const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0);return ctx.getImageData(0,0,canvas.width,canvas.height).data;}
+try {
+ const model=parseMDL(source);
+ const options={width:128,height:96,loadTexture:async()=>white,cameraDirection:[0,0,1]};
+ const lit=await renderModelThumbnail(model,options);
+ check(lit.blob.size>100,'PNG capture succeeds at requested resolution');
+ const a=await rgba(lit); let count=0,max=0;
+ for(let i=0;i<a.length;i+=4){if(a[i+3]>200){count++;max=Math.max(max,a[i]);}}
+ check(count>2000,'Visible framing ignores oversized authored extents');
+ check(max>190&&max<250,'Bright SD lighting is applied to normally shaded layers');
+ model.Materials[0].Layers[0].Shading|=1;
+ const unshaded=await renderModelThumbnail(model,options);const b=await rgba(unshaded);
+ check(Math.max(...b.filter((v,i)=>i%4===0))===255,'Unshaded bypasses lighting');
+ const warmCanvas=document.createElement('canvas');
+ const warmGL=warmCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
+ let programs=0;const createProgram=warmGL.createProgram.bind(warmGL);
+ warmGL.createProgram=()=>{programs++;return createProgram();};
+ const session=new ThumbnailSession({canvas:warmCanvas});let loads=0;
+ const pixels=new Uint8ClampedArray(16*16*4).fill(255);
+ const warm={width:64,height:64,maxTextureSize:8,loadTexture:async()=>{loads++;return {type:'imageData',imageData:[new ImageData(pixels,16,16)]};}};
+ await Promise.all([session.render(model,warm),session.render(model,warm)]);
+ check(loads===1,'Warm session serializes captures and reuses uploaded textures');
+ check(programs===1,'Warm captures compile the mesh program only once');
+ check(session.getCacheStats().estimatedBytes===Math.ceil(8*8*4*4/3),'Texture cap reduces actual upload dimensions');
+ await session.render(model,{...warm,textureNamespace:'another-archive'});
+ check(loads===2,'Archive namespaces avoid texture cache collisions');
+ await session.clearTextures();await session.render(model,warm);
+ check(loads===3,'Clearing the warm cache reloads textures');await session.destroy();warmGL.getExtension('WEBGL_lose_context')?.loseContext();
+ const tinySession=new ThumbnailSession({maxCachedTextureBytes:1});await tinySession.render(model,warm);
+ check(tinySession.getCacheStats().textures===0,'Cache budget evicts oversized textures');await tinySession.destroy();
+ const adapter=await navigator.gpu?.requestAdapter();
+ if(adapter){const device=await adapter.requestDevice();for(const [name,source] of Object.entries({sdGPU,hdGPU,depthGPU,ribbonGPU})){
+  const code=source.replaceAll('${MAX_NODES}','254').replaceAll('${MAX_ENV_MIP_LEVELS}','5.0'); const module=device.createShaderModule({code});const info=await module.getCompilationInfo();
+  check(!info.messages.some(m=>m.type==='error'),name+' compiles: '+JSON.stringify(info.messages.map(m=>({message:m.message,line:m.lineNum,type:m.type}))));}
+  device.pushErrorScope('validation');
+  const gpuCanvas=document.createElement('canvas');gpuCanvas.width=64;gpuCanvas.height=64;
+  const context=gpuCanvas.getContext('webgpu');context.configure({device,format:navigator.gpu.getPreferredCanvasFormat(),alphaMode:'premultiplied'});
+  const gpuRenderer=new ModelRenderer(model);await gpuRenderer.initGPUDevice(gpuCanvas,device,context);await gpuRenderer.loadTextures(async()=>white);
+  gpuRenderer.setPose(0,1);const gpuCamera=fitThumbnailCamera(gpuRenderer.getVisibleBounds(),64,64,[0,0,1]);
+  gpuRenderer.setCamera(gpuCamera.position,gpuCamera.rotation);await gpuRenderer.renderAsync(gpuCamera.view,gpuCamera.projection);
+  const gpuError=await device.popErrorScope();check(!gpuError,'WebGPU SD pipeline draws without validation errors: '+gpuError?.message);
+  gpuRenderer.destroy();device.destroy();}
+ else report.push('WebGPU adapter unavailable; WebGL2 runtime verified');
+ const canvas=document.createElement('canvas');canvas.width=128;canvas.height=128;
+ const gl=canvas.getContext('webgl2',{preserveDrawingBuffer:true});
+ const renderer=new ModelRenderer(model);renderer.setEnvironmentMapProcessingEnabled(false);renderer.initGL(gl);
+ let ready=false;const readyPromise=renderer.whenReady({timeoutMs:10000}).then(()=>ready=true);
+ let rendered=false;const renderedPromise=renderer.whenRendered({timeoutMs:10000}).then(()=>rendered=true);
+ renderer.update(0);renderer.render(mat4.create(),mat4.create(),{});await new Promise(r=>setTimeout(r,10));
+ check(!ready&&!rendered,'Readiness does not resolve on incomplete placeholder draws');
+ await renderer.loadTextures(async()=>white);await readyPromise;
+ renderer.setPose(0,1);const camera=fitThumbnailCamera(renderer.getVisibleBounds(),128,128,[0,0,1]);
+ await renderer.renderAsync(camera.view,camera.projection);await renderedPromise;
+ check(rendered&&renderer.getFrame()===1,'First complete draw is awaited with frozen animation time');
+ check(gl.getError()===gl.NO_ERROR,'WebGL draws finish without driver errors');renderer.destroy();gl.getExtension('WEBGL_lose_context')?.loseContext();
+ const fixtures=new URLSearchParams(location.search);
+ if(fixtures.has('mdl')&&fixtures.has('blp')) {
+ const azerite=parseMDL(await (await fetch(fixtures.get('mdl'))).text());
+ const blp=await (await fetch(fixtures.get('blp'))).arrayBuffer();
+ const loadTexture=async(texture)=>{if(/Azerite01\.blp$/i.test(texture.Image))return{type:'blp',buffer:blp};throw new Error('Not supplied: '+texture.Image);};
+ let rejected=false;try{await renderModelThumbnail(azerite,{width:256,height:256,loadTexture});}catch(error){rejected=/Missing textures/.test(error.message);}
+ check(rejected,'Incomplete Azerite texture set rejects strict thumbnail capture');
+ for(const sequence of [0,1,2]) {const result=await renderModelThumbnail(azerite,{width:256,height:256,loadTexture,allowMissingTextures:true,sequence,frameOffsetMs:sequence===0?1:500});
+   check(result.missingTextures.length===4,'Azerite reports all four unavailable DDS textures');await show(result,azerite.Sequences[sequence].Name);}
+ }
+ status.textContent='PASS\n'+report.join('\n');document.body.dataset.result='pass';
+}catch(error){status.textContent='FAIL\n'+error.stack+'\n'+report.join('\n');document.body.dataset.result='fail';}
+</script>
