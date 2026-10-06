@@ -180,10 +180,9 @@ const defaultScaling = vec3.fromValues(1, 1, 1);
 
 const tempParentRotationQuat: quat = quat.create();
 const tempParentRotationMat: mat4 = mat4.create();
-const tempInheritedRotation: quat = quat.create();
 const tempInheritedScale: vec3 = vec3.create();
-const tempInheritedTranslation: vec3 = vec3.create();
-const tempParentInverse: mat4 = mat4.create();
+const tempInheritedPivot: vec3 = vec3.create();
+const tempInheritedParent: mat4 = mat4.create();
 const tempCameraMat: mat4 = mat4.create();
 const tempTransformedPivotPoint: vec3 = vec3.create();
 const tempAxis: vec3 = vec3.create();
@@ -4625,28 +4624,11 @@ export class ModelRenderer {
     }
 
     private updateNode (node: NodeWrapper): void {
-        let translationRes = this.interp.vec3(translation, node.node.Translation);
-        let rotationRes = this.interp.quat(rotation, node.node.Rotation);
-        let scalingRes = this.interp.vec3(scaling, node.node.Scaling);
+        const translationRes = this.interp.vec3(translation, node.node.Translation);
+        const rotationRes = this.interp.quat(rotation, node.node.Rotation);
+        const scalingRes = this.interp.vec3(scaling, node.node.Scaling);
         const parent = this.rendererData.nodes[node.node.Parent];
         const flags = node.node.Flags || 0;
-        if (parent) {
-            if (flags & NodeFlags.DontInheritRotation && !(flags & NodeFlags.Billboarded)) {
-                mat4.getRotation(tempParentRotationQuat, parent.matrix);
-                quat.invert(tempParentRotationQuat, tempParentRotationQuat);
-                rotationRes = quat.mul(tempInheritedRotation, tempParentRotationQuat, rotationRes || defaultRotation);
-            }
-            if (flags & NodeFlags.DontInheritScaling) {
-                mat4.getScaling(tempInheritedScale, parent.matrix);
-                const local = scalingRes || defaultScaling;
-                for (let i = 0; i < 3; ++i) tempInheritedScale[i] = Math.abs(tempInheritedScale[i]) > 1e-8 ? local[i] / tempInheritedScale[i] : local[i];
-                scalingRes = tempInheritedScale;
-            }
-            if (flags & NodeFlags.DontInheritTranslation && mat4.invert(tempParentInverse, parent.matrix)) {
-                vec3.set(tempInheritedTranslation, tempParentInverse[12], tempParentInverse[13], tempParentInverse[14]);
-                translationRes = vec3.add(tempInheritedTranslation, tempInheritedTranslation, translationRes || defaultTranslation);
-            }
-        }
 
         if (!translationRes && !rotationRes && !scalingRes) {
             mat4.identity(node.matrix);
@@ -4663,8 +4645,39 @@ export class ModelRenderer {
             );
         }
 
-        if (node.node.Parent || node.node.Parent === 0) {
-            mat4.mul(node.matrix, this.rendererData.nodes[node.node.Parent].matrix, node.matrix);
+        if (parent) {
+            const removeRotation = flags & NodeFlags.DontInheritRotation && !(flags & NodeFlags.Billboarded);
+            const removeScaling = flags & NodeFlags.DontInheritScaling;
+            if (removeRotation || removeScaling) {
+                // Filter the inherited linear transform before composing local animation.
+                // Compensating local TRS independently gives the wrong inverse order for R*S.
+                vec3.add(tempInheritedPivot, node.node.PivotPoint as vec3, translationRes || defaultTranslation);
+                vec3.transformMat4(tempInheritedPivot, tempInheritedPivot, parent.matrix);
+                mat4.getScaling(tempInheritedScale, parent.matrix);
+                mat4.identity(tempInheritedParent);
+                for (let column = 0; column < 3; ++column) {
+                    if (removeRotation) {
+                        tempInheritedParent[column * 5] = removeScaling ? 1 : tempInheritedScale[column];
+                    } else {
+                        const scale = tempInheritedScale[column];
+                        if (scale > 1e-8) for (let row = 0; row < 3; ++row) {
+                            tempInheritedParent[column * 4 + row] = parent.matrix[column * 4 + row] / scale;
+                        }
+                    }
+                }
+                mat4.mul(node.matrix, tempInheritedParent, node.matrix);
+                const pivot = node.node.PivotPoint;
+                for (let row = 0; row < 3; ++row) {
+                    // Keep the animated pivot attached to the parent independently of orientation.
+                    node.matrix[12 + row] = tempInheritedPivot[row] -
+                        node.matrix[row] * pivot[0] - node.matrix[4 + row] * pivot[1] - node.matrix[8 + row] * pivot[2];
+                }
+            } else mat4.mul(node.matrix, parent.matrix, node.matrix);
+            if (flags & NodeFlags.DontInheritTranslation) {
+                node.matrix[12] -= parent.matrix[12];
+                node.matrix[13] -= parent.matrix[13];
+                node.matrix[14] -= parent.matrix[14];
+            }
         }
         if (flags & NodeFlags.CameraAnchored) {
             node.matrix[12] += this.rendererData.cameraPos[0];

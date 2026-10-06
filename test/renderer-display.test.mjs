@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mat4, vec3} from 'gl-matrix';
+import {mat4, quat, vec3} from 'gl-matrix';
 import {parseMDL, ModelRenderer, fitThumbnailCamera} from '../dist/es/war3-model.mjs';
 
 function fixture() {
@@ -63,6 +63,35 @@ for (const [flags, translation, scale] of [[0,10,2], [1,0,2], [4,10,1], [5,0,1]]
     renderer.setCamera([3,4,5], [0,0,0,1]);
     renderer.update(0);
     assert.deepEqual([...renderer.rendererData.nodes[1].matrix.slice(12,15)], [3,4,5], 'camera anchored node follows camera position');
+}
+for (let flags = 0; flags < 8; ++flags) {
+    const model = fixture();
+    const parentRotation = quat.setAxisAngle(quat.create(), [0,0,1], Math.PI / 4);
+    const childRotation = quat.setAxisAngle(quat.create(), [1,0,0], Math.PI / 6);
+    model.Nodes[0].Translation = track([10,20,30]);
+    model.Nodes[0].Rotation = track([...parentRotation]);
+    model.Nodes[0].Scaling = track([2,3,4]);
+    const pivot = [1,2,3];
+    model.Nodes.push({ObjectId: 1, Parent: 0, Flags: flags, PivotPoint: new Float32Array(pivot),
+        Translation: track([0.5,1,2]), Rotation: track([...childRotation]), Scaling: track([1.5,2,1])});
+    const renderer = new ModelRenderer(model);renderer.update(0);
+    const linear = mat4.fromRotationTranslationScale(mat4.create(), flags & 2 ? quat.create() : parentRotation,
+        [0,0,0], flags & 4 ? [1,1,1] : [2,3,4]);
+    const expectedPivot = vec3.transformMat4(vec3.create(), pivot, renderer.rendererData.nodes[0].matrix);
+    if (flags & 1) vec3.sub(expectedPivot, expectedPivot, [10,20,30]);
+    const parentLinear = mat4.clone(renderer.rendererData.nodes[0].matrix);
+    parentLinear[12] = parentLinear[13] = parentLinear[14] = 0;
+    const localTranslation = vec3.transformMat4(vec3.create(), [0.5,1,2], parentLinear);
+    vec3.add(expectedPivot, expectedPivot, localTranslation);
+    const matrix = renderer.rendererData.nodes[1].matrix;
+    const actualPivot = vec3.transformMat4(vec3.create(), pivot, matrix);
+    for (let axis = 0; axis < 3; ++axis) {
+        assert.ok(Math.abs(actualPivot[axis] - expectedPivot[axis]) < 1e-5, `flags ${flags} preserve pivot motion`);
+        const localAxis = vec3.transformQuat(vec3.create(), [axis === 0 ? 1.5 : 0, axis === 1 ? 2 : 0, axis === 2 ? 1 : 0], childRotation);
+        const expectedAxis = vec3.transformMat4(vec3.create(), localAxis, linear);
+        for (let row = 0; row < 3; ++row) assert.ok(Math.abs(matrix[axis * 4 + row] - expectedAxis[row]) < 1e-5,
+            `flags ${flags} compose inherited rotation/scaling before local animation`);
+    }
 }
 {
     const model = fixture();
