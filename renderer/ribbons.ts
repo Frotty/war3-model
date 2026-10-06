@@ -121,6 +121,12 @@ export class RibbonsController {
             this.gpuVSUniformsBuffer = null;
         }
         for (const emitter of this.emitters) {
+            if (this.gl) {
+                this.gl.deleteBuffer(emitter.vertexBuffer);
+                this.gl.deleteBuffer(emitter.texCoordBuffer);
+            }
+            emitter.vertexGPUBuffer?.destroy();
+            emitter.texCoordGPUBuffer?.destroy();
             for (const buffer of emitter.fsUnifrmsPerLayer) {
                 buffer.destroy();
             }
@@ -373,12 +379,6 @@ export class RibbonsController {
     public update (delta: number): void {
         this.elapsed += delta;
         for (const emitter of this.emitters) {
-            if (this.gl) {
-                this.gl.deleteBuffer(emitter.vertexBuffer);
-                this.gl.deleteBuffer(emitter.texCoordBuffer);
-            }
-            emitter.vertexGPUBuffer?.destroy();
-            emitter.texCoordGPUBuffer?.destroy();
             this.updateEmitter(emitter, delta);
         }
     }
@@ -394,11 +394,17 @@ export class RibbonsController {
     public expandBounds (bounds: VisibleBounds): void {
         const point = vec3.create();
         for (const emitter of this.emitters) {
+            if (!this.visibleEmitter(emitter)) continue;
             for (let i = 0; i < emitter.creationTimes.length * 6; i += 3) {
                 vec3.set(point, emitter.vertices[i], emitter.vertices[i + 1], emitter.vertices[i + 2]);
                 expandBounds(bounds, point);
             }
         }
+    }
+
+    private visibleEmitter (emitter: RibbonEmitterWrapper): boolean {
+        return emitter.creationTimes.length >= 2 && this.interp.animVectorVal(emitter.props.Alpha, 1) > 1e-6 &&
+            this.rendererData.model.Materials[emitter.props.MaterialID].Layers.some(layer => this.interp.animVectorVal(layer.Alpha, 1) > 1e-6);
     }
 
     public render (mvMatrix: mat4, pMatrix: mat4, emitterIndex?: number): void {
@@ -416,7 +422,7 @@ export class RibbonsController {
 
         for (const emitter of this.emitters) {
             if (emitterIndex !== undefined && emitter.index !== emitterIndex) continue;
-            if (emitter.creationTimes.length < 2) {
+            if (!this.visibleEmitter(emitter)) {
                 continue;
             }
 
@@ -426,6 +432,7 @@ export class RibbonsController {
             for (let j = 0; j < material.Layers.length; ++j) {
                 const color = emitter.props.Color || new Float32Array([1, 1, 1]);
                 const layerAlpha = this.interp.animVectorVal(material.Layers[j].Alpha, 1);
+                if (layerAlpha < 1e-6) continue;
                 this.gl.uniform4f(this.shaderProgramLocations.colorUniform,
                     color[2] * layerAlpha, color[1] * layerAlpha, color[0] * layerAlpha,
                     this.interp.animVectorVal(emitter.props.Alpha, 1) * layerAlpha);
@@ -454,7 +461,7 @@ export class RibbonsController {
 
         for (const emitter of this.emitters) {
             if (emitterIndex !== undefined && emitter.index !== emitterIndex) continue;
-            if (emitter.creationTimes.length < 2) {
+            if (!this.visibleEmitter(emitter)) {
                 continue;
             }
 
@@ -473,6 +480,8 @@ export class RibbonsController {
                 const textureID = this.rendererData.materialLayerTextureID[materialID][j];
                 const texture = this.rendererData.model.Textures[textureID];
                 const layer = material.Layers[j];
+                const layerAlpha = this.interp.animVectorVal(layer.Alpha, 1);
+                if (layerAlpha < 1e-6) continue;
 
                 const pipeline = this.gpuPipelines[layer.FilterMode] || this.gpuPipelines[0];
                 pass.setPipeline(pipeline);
@@ -490,7 +499,6 @@ export class RibbonsController {
                 fsUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
                 fsUniformsViews.discardAlphaLevel.set([layer.FilterMode === FilterMode.Transparent ? .75 : 0]);
                 const color = emitter.props.Color || new Float32Array([1, 1, 1]);
-                const layerAlpha = this.interp.animVectorVal(layer.Alpha, 1);
                 fsUniformsViews.color.set([color[2] * layerAlpha, color[1] * layerAlpha, color[0] * layerAlpha,
                     this.interp.animVectorVal(emitter.props.Alpha, 1) * layerAlpha]);
                 const texAnim = textureAnimationMatrix(this.interp, this.rendererData.model, layer);

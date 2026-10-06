@@ -53,8 +53,20 @@ try {
  check(loads===2,'Archive namespaces avoid texture cache collisions');
  await session.clearTextures();await session.render(model,warm);
  check(loads===3,'Clearing the warm cache reloads textures');await session.destroy();warmGL.getExtension('WEBGL_lose_context')?.loseContext();
+ const freshSession=new ThumbnailSession();await freshSession.clearTextures();await freshSession.render(model,warm);await freshSession.destroy();
+ report.push('Clearing a fresh session preserves capture context settings');
  const tinySession=new ThumbnailSession({maxCachedTextureBytes:1});await tinySession.render(model,warm);
  check(tinySession.getCacheStats().textures===0,'Cache budget evicts oversized textures');await tinySession.destroy();
+ const ribbonModel=parseMDL(source);ribbonModel.Geosets=[];
+ const ribbon={ObjectId:1,Parent:0,Flags:0,PivotPoint:new Float32Array(3),
+  Translation:{Frames:new Uint32Array([0,1000]),Values:new Float32Array([-1,0,0,1,0,0]),VectorSize:3,LineType:1,GlobalSeqId:null},
+  HeightAbove:0.5,HeightBelow:0.5,Color:new Float32Array([0,1,0]),Alpha:1,LifeSpan:2,
+  EmissionRate:30,Rows:1,Columns:1,TextureSlot:0,MaterialID:0,Gravity:0};
+ ribbonModel.Nodes.push(ribbon);ribbonModel.RibbonEmitters=[ribbon];
+ const ribbonImage=await renderModelThumbnail(ribbonModel,{...options,warmupMs:500});
+ const ribbonPixels=await rgba(ribbonImage);
+ check(ribbonPixels.some((value,index)=>index%4===3&&value>100),'Warmed ribbons retain their GL buffers and render visible pixels');
+ check(Math.abs(ribbonImage.frame-501)<0.01,'Effect warmup starts at the requested initial pose');
  const adapter=await navigator.gpu?.requestAdapter();
  if(adapter){const device=await adapter.requestDevice();for(const [name,source] of Object.entries({sdGPU,hdGPU,depthGPU,ribbonGPU})){
   const code=source.replaceAll('${MAX_NODES}','254').replaceAll('${MAX_ENV_MIP_LEVELS}','5.0'); const module=device.createShaderModule({code});const info=await module.getCompilationInfo();

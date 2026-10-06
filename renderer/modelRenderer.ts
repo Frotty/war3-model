@@ -406,6 +406,7 @@ export class ModelRenderer {
     private softwareGroupMatrices: mat4[][] = [];
     private softwareGroupNormals: mat3[][] = [];
     private textureSizeLimit = 0;
+    private environmentMapNamespace = '';
     private textureDimensions = new Map<string, [number, number]>();
     private texCoordBuffer: WebGLBuffer[] = [];
     private indexBuffer: WebGLBuffer[] = [];
@@ -684,6 +685,16 @@ export class ModelRenderer {
      */
     public static releaseSharedResources (gl: WebGLRenderingContext | WebGL2RenderingContext): void {
         releaseSharedPrograms(gl);
+        ModelRenderer.releaseSharedEnvironmentMaps(gl);
+        const brdfLUT = sharedBrdfLUT.get(gl);
+        if (brdfLUT) {
+            gl.deleteTexture(brdfLUT);
+            sharedBrdfLUT.delete(gl);
+        }
+    }
+
+    /** Invalidate derived images after their source assets change; keep programs and the LUT warm. */
+    public static releaseSharedEnvironmentMaps (gl: WebGLRenderingContext | WebGL2RenderingContext): void {
         const maps = sharedEnvMaps.get(gl);
         if (maps) {
             maps.forEach(entry => {
@@ -692,11 +703,6 @@ export class ModelRenderer {
                 gl.deleteTexture(entry.prefilteredEnvMap);
             });
             sharedEnvMaps.delete(gl);
-        }
-        const brdfLUT = sharedBrdfLUT.get(gl);
-        if (brdfLUT) {
-            gl.deleteTexture(brdfLUT);
-            sharedBrdfLUT.delete(gl);
         }
     }
 
@@ -1135,6 +1141,11 @@ export class ModelRenderer {
     public setTextureSizeLimit (maximum = 0): void {
         if (!Number.isInteger(maximum) || maximum < 0) throw new Error('Texture size limit must be a non-negative integer');
         this.textureSizeLimit = maximum;
+    }
+
+    /** Isolate derived environment maps when archives reuse texture paths. Set before uploads. */
+    public setEnvironmentMapNamespace (namespace: string): void {
+        this.environmentMapNamespace = namespace;
     }
 
     public getTextureDimensions (path: string): readonly [number, number] | undefined {
@@ -2737,6 +2748,7 @@ export class ModelRenderer {
     }
 
     private processEnvMaps (path: string): void {
+        const cacheKey = JSON.stringify([this.environmentMapNamespace, path, this.textureSizeLimit]);
         if (
             !this.environmentMapProcessingEnabled ||
             !this.rendererData.requiredEnvMaps[path] ||
@@ -2751,7 +2763,7 @@ export class ModelRenderer {
         // context. Nothing here depends on the model, so there is nothing to redo — and without
         // this check a second upload of the same path also leaked the previous cubemaps.
         if (this.gl && !this.device) {
-            const cached = sharedEnvMaps.get(this.gl)?.get(path);
+            const cached = sharedEnvMaps.get(this.gl)?.get(cacheKey);
             if (cached) {
                 this.rendererData.envTextures[path] = cached.envTexture;
                 this.rendererData.irradianceMap[path] = cached.irradianceMap;
@@ -2759,7 +2771,7 @@ export class ModelRenderer {
                 return;
             }
         } else if (this.device) {
-            const cached = sharedGPUEnvMaps.get(this.device)?.get(path);
+            const cached = sharedGPUEnvMaps.get(this.device)?.get(cacheKey);
             if (cached) {
                 this.rendererData.gpuEnvTextures[path] = cached.envTexture;
                 this.rendererData.gpuIrradianceMap[path] = cached.irradianceMap;
@@ -3284,13 +3296,13 @@ export class ModelRenderer {
         // Publish for every other renderer on this context. These outlive the renderer that
         // happened to build them, so destroy() deliberately leaves them alone.
         if (this.device) {
-            cacheFor(sharedGPUEnvMaps, this.device).set(path, {
+            cacheFor(sharedGPUEnvMaps, this.device).set(cacheKey, {
                 envTexture: this.rendererData.gpuEnvTextures[path],
                 irradianceMap: this.rendererData.gpuIrradianceMap[path],
                 prefilteredEnvMap: this.rendererData.gpuPrefilteredEnvMap[path]
             });
         } else {
-            cacheFor(sharedEnvMaps, this.gl).set(path, {
+            cacheFor(sharedEnvMaps, this.gl).set(cacheKey, {
                 envTexture: this.rendererData.envTextures[path],
                 irradianceMap: this.rendererData.irradianceMap[path],
                 prefilteredEnvMap: this.rendererData.prefilteredEnvMap[path]

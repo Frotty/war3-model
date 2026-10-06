@@ -185,6 +185,10 @@ export class ParticlesController {
         }
 
         for (const emitter of this.emitters) {
+            if (this.gl) {
+                for (const buffer of [emitter.colorBuffer, emitter.indexBuffer, emitter.headVertexBuffer,
+                    emitter.tailVertexBuffer, emitter.headTexCoordBuffer, emitter.tailTexCoordBuffer]) this.gl.deleteBuffer(buffer);
+            }
             if (emitter.colorGPUBuffer) {
                 emitter.colorGPUBuffer.destroy();
             }

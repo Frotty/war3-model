@@ -25,6 +25,8 @@ function mockGL(renderer, draws = []) {
         if (/^[A-Z_0-9]+$/.test(name)) return name;
         if (name === 'isContextLost') return () => false;
         if (name === 'fenceSync') return undefined;
+        if (name === 'createBuffer') return () => ({});
+        if (name === 'deleteBuffer') return buffer => uploads.push({target: 'DELETE', bound: buffer});
         if (name === 'bindBuffer') return (_target, buffer) => {bound = buffer;};
         if (name === 'bufferData') return (target, data) => uploads.push({target, bound, data: [...data]});
         if (name === 'drawElements') return () => draws.push('mesh');
@@ -166,6 +168,35 @@ function ribbonFixture() {
         HeightAbove: 1, HeightBelow: 1, MaterialID: 0, Rows: 2, Columns: 3, TextureSlot: 4};
     model.RibbonEmitters = [emitter];
     return new ModelRenderer(model);
+}
+{
+    const renderer = ribbonFixture();
+    const uploads = mockGL(renderer);
+    const controller = renderer.ribbonsController;
+    controller.gl = renderer.gl;
+    renderer.rendererData.model.Geosets = [];
+    renderer.update(100);
+    const emitter = controller.emitters[0];
+    assert.equal(renderer.getVisibleBounds(), null, 'a single ribbon point does not draw');
+    const buffers = [emitter.vertexBuffer, emitter.texCoordBuffer];
+    renderer.update(100);
+    assert.ok(renderer.getVisibleBounds(), 'a live ribbon contributes to visible bounds');
+    emitter.props.Alpha = 0;
+    assert.equal(renderer.getVisibleBounds(), null, 'hidden ribbons do not distort framing');
+    emitter.props.Alpha = 1;
+    renderer.update(0);
+    controller.render(mat4.create(), mat4.create());
+    assert.ok(!uploads.some(upload => upload.target === 'DELETE' && buffers.includes(upload.bound)), 'ribbon buffers survive subsequent updates and draws');
+    controller.destroy();
+    for (const buffer of buffers) assert.ok(uploads.some(upload => upload.target === 'DELETE' && upload.bound === buffer), 'ribbon destroy releases GL buffers');
+    const gpu = ribbonFixture().ribbonsController;
+    let destroyed = 0;
+    gpu.emitters[0].vertexGPUBuffer = {destroy: () => destroyed++};
+    gpu.emitters[0].texCoordGPUBuffer = {destroy: () => destroyed++};
+    gpu.update(0);
+    assert.equal(destroyed, 0, 'GPU ribbon updates keep their buffers alive');
+    gpu.destroy();
+    assert.equal(destroyed, 2, 'GPU ribbon teardown owns destruction');
 }
 {
     const renderer = ribbonFixture();

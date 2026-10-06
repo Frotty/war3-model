@@ -87,16 +87,17 @@ export class ThumbnailSession {
         this.disposed = true;
         await this.pending;
         this.clearCache();
-        const gl = this.canvas.getContext('webgl2') as WebGL2RenderingContext;
+        const gl = this.canvas.getContext('webgl2', {preserveDrawingBuffer: true}) as WebGL2RenderingContext;
         if (gl) ModelRenderer.releaseSharedResources(gl);
         if (gl && this.ownsCanvas) gl.getExtension('WEBGL_lose_context')?.loseContext();
     }
 
     private clearCache (): void {
-        const gl = this.canvas.getContext('webgl2') as WebGL2RenderingContext;
+        const gl = this.canvas.getContext('webgl2', {preserveDrawingBuffer: true}) as WebGL2RenderingContext;
         this.cache.textures.forEach(entry => gl?.deleteTexture(entry.texture));
         this.cache.textures.clear();
         this.cache.bytes = 0;
+        if (gl) ModelRenderer.releaseSharedEnvironmentMaps(gl);
     }
 }
 
@@ -192,6 +193,7 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
     let captured: ThumbnailResult;
     try {
         renderer.setEnvironmentMapProcessingEnabled(options.useEnvironmentMap ?? false);
+        renderer.setEnvironmentMapNamespace(options.textureNamespace || '');
         renderer.setTextureSizeLimit(maxTextureSize);
         renderer.initGL(gl);
         model.Textures.forEach(texture => {
@@ -214,7 +216,7 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
         renderer.setPose(sequence, offset);
         const interval = model.Sequences[sequence]?.Interval || [0, 0];
         let bounds = renderer.getVisibleBounds({levelOfDetail});
-        if (!bounds && options.findVisibleFrame !== false) {
+        if (!bounds && !warmupMs && options.findVisibleFrame !== false) {
             for (let step = 1; step <= 16 && !bounds; ++step) {
                 offset = (interval[1] - interval[0]) * step / 16;
                 renderer.setPose(sequence, offset);
