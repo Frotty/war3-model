@@ -5,6 +5,7 @@ attribute vec4 aGroup;
 
 uniform mat4 uMVMatrix;
 uniform mat4 uPMatrix;
+uniform mat3 uTVertexAnim;
 uniform mat4 uNodesMatrices[${MAX_NODES}];
 
 varying vec3 vNormal;
@@ -33,7 +34,7 @@ void main(void) {
     position.w = 1.;
 
     gl_Position = uPMatrix * uMVMatrix * position;
-    vTextureCoord = aTextureCoord;
+    vTextureCoord = (uTVertexAnim * vec3(aTextureCoord, 1.)).xy;
     mat3 linear = mat3(skin);
     vec3 cof0 = cross(linear[1], linear[2]);
     vec3 cof1 = cross(linear[2], linear[0]);

@@ -45,7 +45,7 @@ import {emptyBounds, expandBounds, skinVertex, sortedFaces, VisibleBounds} from 
 import {cancellable, waitForGL, WaitOptions} from './readiness';
 import {TextureLoader, TextureSource} from './textureLoader';
 import {decode as decodeBLP, getImageData} from '../blp/decode';
-import {createLighting, evaluateLighting} from './lighting';
+import {createLighting, evaluateLighting, MAX_MODEL_LIGHTS} from './lighting';
 import {resizeTexture, textureMipLevel} from './textureSizing';
 
 // actually, all is number
@@ -432,6 +432,7 @@ export class ModelRenderer {
     private initialRenderPending = false;
     private drawOrder: DrawBatch[] = [];
     private lighting = createLighting();
+    private glModelLightLimit = MAX_MODEL_LIGHTS;
     private ambientStrength = 0.8;
     private diffuseStrength = 0.2;
     // Shadowed GL state; see applyLayerState.
@@ -1273,9 +1274,10 @@ export class ModelRenderer {
     }
 
     private initDrawOrder (): void {
-        const batches: DrawBatch[] = [];
+        const groups: DrawBatch[][] = [];
         this.model.Geosets.forEach((geoset, index) => {
             const material = this.model.Materials[geoset.MaterialID];
+            const batches: DrawBatch[] = [];
             let skip = -1;
             material.Layers.forEach((layer, layerIndex) => {
                 if (layerIndex === skip || (this.isHD && layerIndex > 0)) return;
@@ -1284,15 +1286,17 @@ export class ModelRenderer {
                 batches.push({kind: 'geoset', index, layer: layerIndex, priority: material.PriorityPlane || 0,
                     opaque: (layer.FilterMode || 0) < FilterMode.Blend});
             });
+            if (batches.length) groups.push(batches);
         });
-        this.model.ParticleEmitters2.forEach((emitter, index) => batches.push({kind: 'particle', index, layer: 0,
-            priority: emitter.PriorityPlane || 0, opaque: false}));
-        this.model.RibbonEmitters.forEach((emitter, index) => batches.push({kind: 'ribbon', index, layer: 0,
-            priority: this.model.Materials[emitter.MaterialID]?.PriorityPlane || 0, opaque: false}));
-        // Stable ties preserve the model's original layer order, including multi-pass materials.
-        this.drawOrder = batches.map((batch, order) => ({batch, order})).sort((a, b) =>
-            Number(b.batch.opaque) - Number(a.batch.opaque) ||
-            (a.batch.opaque ? 0 : a.batch.priority - b.batch.priority) || a.order - b.order).map(entry => entry.batch);
+        this.model.ParticleEmitters2.forEach((emitter, index) => groups.push([{kind: 'particle', index, layer: 0,
+            priority: emitter.PriorityPlane || 0, opaque: false}]));
+        this.model.RibbonEmitters.forEach((emitter, index) => groups.push([{kind: 'ribbon', index, layer: 0,
+            priority: this.model.Materials[emitter.MaterialID]?.PriorityPlane || 0, opaque: false}]));
+        // Sort complete material passes by their first layer; never split authored composition.
+        this.drawOrder = groups.map((batches, order) => ({batches, order})).sort((a, b) =>
+            Number(b.batches[0].opaque) - Number(a.batches[0].opaque) ||
+            (a.batches[0].opaque ? 0 : a.batches[0].priority - b.batches[0].priority) || a.order - b.order)
+            .flatMap(entry => entry.batches);
     }
 
     private getGeosetUVBuffer (index: number, coordId = 0): WebGLBuffer {
@@ -2122,9 +2126,11 @@ export class ModelRenderer {
             this.gl.uniform3fv(this.shaderProgramLocations.ambientUniform, this.lighting.ambient);
             this.gl.uniform3fv(this.shaderProgramLocations.lightPosUniform, this.rendererData.lightPos);
             this.gl.uniform3fv(this.shaderProgramLocations.lightColorUniform, this.rendererData.lightColor);
-            this.gl.uniform4fv(this.shaderProgramLocations.modelLightPositionsUniform, this.lighting.positions);
-            this.gl.uniform4fv(this.shaderProgramLocations.modelLightColorsUniform, this.lighting.colors);
-            this.gl.uniform4fv(this.shaderProgramLocations.modelLightAttenuationUniform, this.lighting.attenuation);
+            if (this.glModelLightLimit) {
+                this.gl.uniform4fv(this.shaderProgramLocations.modelLightPositionsUniform, this.lighting.positions.subarray(0, this.glModelLightLimit * 4));
+                this.gl.uniform4fv(this.shaderProgramLocations.modelLightColorsUniform, this.lighting.colors.subarray(0, this.glModelLightLimit * 4));
+                this.gl.uniform4fv(this.shaderProgramLocations.modelLightAttenuationUniform, this.lighting.attenuation.subarray(0, this.glModelLightLimit * 4));
+            }
         }
 
         for (const batch of this.drawOrder) {
@@ -3398,7 +3404,10 @@ export class ModelRenderer {
         if (this.isHD) {
             fragmentShaderSource = isWebGL2(this.gl) ? fragmentShaderHDNew : fragmentShaderHDOld;
         } else {
-            fragmentShaderSource = fragmentShader;
+            // The remaining fragment uniforms need at most fourteen vectors. Each light needs three.
+            this.glModelLightLimit = Math.max(0, Math.min(MAX_MODEL_LIGHTS,
+                Math.floor((this.gl.getParameter(this.gl.MAX_FRAGMENT_UNIFORM_VECTORS) - 14) / 3)));
+            fragmentShaderSource = `#define MAX_MODEL_LIGHTS ${this.glModelLightLimit}\n${fragmentShader}`;
         }
 
         const shaderProgram = this.shaderProgram = getSharedProgram(this.gl, vertexShaderSource, fragmentShaderSource);
@@ -4960,7 +4969,7 @@ export class ModelRenderer {
 
     private setLayerProps (materialID: number, layerIndex: number, layer: Layer, textureID: number): void {
         this.gl.uniform4f(this.shaderProgramLocations.lightingUniform, this.diffuseStrength,
-            layer.Shading & LayerShading.Unshaded ? 1 : 0, this.lighting.count, 0);
+            layer.Shading & LayerShading.Unshaded ? 1 : 0, Math.min(this.lighting.count, this.glModelLightLimit), 0);
         const texture = this.model.Textures[textureID];
         const maskTextureID = texture.ReplaceableId === 1 || texture.ReplaceableId === 2 ?
             this.getReplaceableMaskTextureID(materialID, layerIndex) :

@@ -38,6 +38,25 @@ try {
  model.Materials[0].Layers[0].Shading|=1;
  const unshaded=await renderModelThumbnail(model,options);const b=await rgba(unshaded);
  check(Math.max(...b.filter((v,i)=>i%4===0))===255,'Unshaded bypasses lighting');
+ for(const [uniformBudget, expectedLights] of [[16,0],[20,2],[128,8]]) {
+  const legacyCanvas=document.createElement('canvas');legacyCanvas.width=64;legacyCanvas.height=64;
+  const legacyGL=legacyCanvas.getContext('webgl',{preserveDrawingBuffer:true});
+  const getParameter=legacyGL.getParameter.bind(legacyGL);
+  legacyGL.getParameter=pname=>pname===legacyGL.MAX_FRAGMENT_UNIFORM_VECTORS?uniformBudget:getParameter(pname);
+  const legacyRenderer=new ModelRenderer(parseMDL(source));legacyRenderer.setEnvironmentMapProcessingEnabled(false);
+  legacyRenderer.initGL(legacyGL);await legacyRenderer.loadTextures(async()=>white);legacyRenderer.setPose(0,1);
+  const legacyCamera=fitThumbnailCamera(legacyRenderer.getVisibleBounds(),64,64,[0,0,1]);
+  legacyRenderer.setCamera(legacyCamera.position,legacyCamera.rotation);
+  await legacyRenderer.renderAsync(legacyCamera.view,legacyCamera.projection);
+  let lightArraySize=0;
+  for(let i=0;i<legacyGL.getProgramParameter(legacyRenderer.shaderProgram,legacyGL.ACTIVE_UNIFORMS);i++) {
+   const uniform=legacyGL.getActiveUniform(legacyRenderer.shaderProgram,i);
+   if(uniform.name==='uModelLightPositions[0]')lightArraySize=uniform.size;
+  }
+  check(lightArraySize===expectedLights&&legacyGL.getError()===legacyGL.NO_ERROR,
+   `WebGL1 SD links and draws within a ${uniformBudget}-vector fragment budget (${expectedLights} lights)`);
+  legacyRenderer.destroy();ModelRenderer.releaseSharedResources(legacyGL);legacyGL.getExtension('WEBGL_lose_context')?.loseContext();
+ }
  const warmCanvas=document.createElement('canvas');
  const warmGL=warmCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
  let programs=0;const createProgram=warmGL.createProgram.bind(warmGL);

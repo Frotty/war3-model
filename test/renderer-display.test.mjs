@@ -136,6 +136,18 @@ for (const [flags, translation, scale] of [[0,10,2], [1,0,2], [4,10,1], [5,0,1]]
 
 {
     const model = fixture();
+    model.Materials[0].Layers.push({FilterMode: 0, TextureID: 0, Alpha: 1});
+    model.Materials.push({PriorityPlane: 99, Layers: [{FilterMode: 0, TextureID: 0, Alpha: 1}]});
+    model.Geosets.push({...model.Geosets[0], MaterialID: 1});
+    model.ParticleEmitters2 = [{PriorityPlane: -2, EmissionRate: 0, LifeSpan: 1}];
+    const renderer = new ModelRenderer(model);
+    assert.deepEqual(renderer.drawOrder.map(b => [b.kind, b.index, b.layer]),
+        [['geoset',1,0], ['particle',0,0], ['geoset',0,0], ['geoset',0,1]],
+        'mixed-filter materials keep authored passes adjacent and ordered');
+}
+
+{
+    const model = fixture();
     model.GlobalSequences = [300];
     const renderer = new ModelRenderer(model);
     renderer.setPose(0, 501);
