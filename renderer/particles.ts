@@ -1094,10 +1094,11 @@ export class ParticlesController {
         }
 
         const texture = this.rendererData.model.Textures[emitter.props.TextureID];
+        this.gl.activeTexture(this.gl.TEXTURE0);
+        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image] || this.rendererData.whiteTexture);
+        this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
+        this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, 0);
         if (texture.Image) {
-            this.gl.activeTexture(this.gl.TEXTURE0);
-            this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image]);
-            this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
             this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, 0);
         } else if (texture.ReplaceableId === 1 || texture.ReplaceableId === 2) {
             this.gl.uniform3fv(this.shaderProgramLocations.replaceableColorUniform, this.rendererData.teamColor);

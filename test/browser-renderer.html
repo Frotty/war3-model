@@ -67,6 +67,34 @@ try {
  const ribbonPixels=await rgba(ribbonImage);
  check(ribbonPixels.some((value,index)=>index%4===3&&value>100),'Warmed ribbons retain their GL buffers and render visible pixels');
  check(Math.abs(ribbonImage.frame-501)<0.01,'Effect warmup starts at the requested initial pose');
+ const fallbackRibbon=await renderModelThumbnail(ribbonModel,{...options,warmupMs:500,allowMissingTextures:true,
+  loadTexture:async()=>{throw new Error('Unavailable effect texture');}});
+ const fallbackPixels=await rgba(fallbackRibbon);
+ check(fallbackRibbon.missingTextures.length===1&&fallbackPixels.some((value,index)=>index%4===1&&value>100),
+  'Missing ribbon textures use the white fallback and retain their tint');
+ const particleModel=parseMDL(source);particleModel.Geosets=[];
+ const particle={ObjectId:1,Parent:0,Flags:1048576,PivotPoint:new Float32Array(3),TextureID:0,
+  Speed:0,Variation:0,Latitude:0,Gravity:0,EmissionRate:30,Width:0,Length:0,LifeSpan:2,
+  FrameFlags:1,FilterMode:0,Rows:1,Columns:1,Time:0.5,TailLength:0,
+  SegmentColor:[new Float32Array([0,1,0]),new Float32Array([0,1,0]),new Float32Array([0,1,0])],
+  Alpha:new Uint8Array([255,255,255]),ParticleScaling:new Float32Array([1,1,1]),
+  LifeSpanUVAnim:new Uint32Array([0,0,1]),DecayUVAnim:new Uint32Array([0,0,1]),
+  TailUVAnim:new Uint32Array([0,0,1]),TailDecayUVAnim:new Uint32Array([0,0,1])};
+ particleModel.Nodes.push(particle);particleModel.ParticleEmitters2=[particle];
+ const fallbackParticle=await renderModelThumbnail(particleModel,{...options,warmupMs:500,allowMissingTextures:true,
+  loadTexture:async()=>{throw new Error('Unavailable effect texture');}});
+ const particlePixels=await rgba(fallbackParticle);
+ check(fallbackParticle.missingTextures.length===1&&particlePixels.some((value,index)=>index%4===1&&value>100),
+  'Missing ParticleEmitter2 textures use the same white fallback and retain their tint');
+ const ddsProbe=document.createElement('canvas').getContext('webgl2');
+ if(ddsProbe.getSupportedExtensions().includes('WEBGL_compressed_texture_s3tc')) {
+  const ddsImage=await renderModelThumbnail(model,{...options,maxTextureSize:4,loadTexture:async()=>({type:'dds',format:0x83F0,
+   buffer:new Uint8Array([224,7,0,0,0,0,0,0]).buffer,
+   info:{format:'dxt1',shape:{width:4,height:4},images:[{offset:0,length:8,shape:{width:4,height:4}}]}})});
+  const ddsPixels=await rgba(ddsImage);check(ddsPixels.some((value,index)=>index%4===1&&value>200),
+   'DDS loader enables compression on its internal context and uploads green DXT1 pixels');
+ }
+ ddsProbe.getExtension('WEBGL_lose_context')?.loseContext();
  const adapter=await navigator.gpu?.requestAdapter();
  if(adapter){const device=await adapter.requestDevice();for(const [name,source] of Object.entries({sdGPU,hdGPU,depthGPU,ribbonGPU})){
   const code=source.replaceAll('${MAX_NODES}','254').replaceAll('${MAX_ENV_MIP_LEVELS}','5.0'); const module=device.createShaderModule({code});const info=await module.getCompilationInfo();

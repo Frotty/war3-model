@@ -33,6 +33,7 @@ export interface RendererData {
     shadowBias: number;
     shadowSmoothingStep: number;
     textures: {[key: string]: WebGLTexture};
+    whiteTexture: WebGLTexture;
     gpuTextures: {[key: string]: GPUTexture};
     gpuSamplers: GPUSampler[];
     gpuDepthSampler: GPUSampler;

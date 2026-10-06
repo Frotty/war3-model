@@ -27,6 +27,7 @@ function mockGL(renderer, draws = []) {
         if (name === 'fenceSync') return undefined;
         if (name === 'createBuffer') return () => ({});
         if (name === 'deleteBuffer') return buffer => uploads.push({target: 'DELETE', bound: buffer});
+        if (name === 'bindTexture') return (_target, texture) => uploads.push({target: 'TEXTURE', bound: texture});
         if (name === 'bindBuffer') return (_target, buffer) => {bound = buffer;};
         if (name === 'bufferData') return (target, data) => uploads.push({target, bound, data: [...data]});
         if (name === 'drawElements') return () => draws.push('mesh');
@@ -168,6 +169,22 @@ function ribbonFixture() {
         HeightAbove: 1, HeightBelow: 1, MaterialID: 0, Rows: 2, Columns: 3, TextureSlot: 4};
     model.RibbonEmitters = [emitter];
     return new ModelRenderer(model);
+}
+{
+    const model = fixture();
+    model.ParticleEmitters2 = [{EmissionRate: 0, LifeSpan: 1, TextureID: 0, FilterMode: 0}];
+    const renderer = new ModelRenderer(model);
+    const uploads = mockGL(renderer);
+    const fallback = renderer.rendererData.whiteTexture = {};
+    const particles = renderer.particlesController;
+    particles.gl = renderer.gl;
+    particles.setLayerProps(particles.emitters[0]);
+    const ribbons = ribbonFixture().ribbonsController;
+    ribbons.gl = renderer.gl;
+    ribbons.rendererData.whiteTexture = fallback;
+    ribbons.setLayerProps(model.Materials[0].Layers[0], 0);
+    assert.equal(uploads.filter(upload => upload.target === 'TEXTURE' && upload.bound === fallback).length, 2,
+        'both effect controllers bind the shared fallback when an image is missing');
 }
 {
     const renderer = ribbonFixture();

@@ -52,7 +52,8 @@ import {resizeTexture, textureMipLevel} from './textureSizing';
 export type DDS_FORMAT = WEBGL_compressed_texture_s3tc['COMPRESSED_RGBA_S3TC_DXT1_EXT'] |
     WEBGL_compressed_texture_s3tc['COMPRESSED_RGBA_S3TC_DXT3_EXT'] |
     WEBGL_compressed_texture_s3tc['COMPRESSED_RGBA_S3TC_DXT5_EXT'] |
-    WEBGL_compressed_texture_s3tc['COMPRESSED_RGB_S3TC_DXT1_EXT'];
+    WEBGL_compressed_texture_s3tc['COMPRESSED_RGB_S3TC_DXT1_EXT'] |
+    EXT_texture_compression_rgtc['COMPRESSED_RED_GREEN_RGTC2_EXT'];
 
 const MAX_NODES = 254;
 
@@ -407,6 +408,7 @@ export class ModelRenderer {
     private softwareGroupNormals: mat3[][] = [];
     private textureSizeLimit = 0;
     private environmentMapNamespace = '';
+    private supportedCompressedFormats: Set<number>;
     private textureDimensions = new Map<string, [number, number]>();
     private texCoordBuffer: WebGLBuffer[] = [];
     private indexBuffer: WebGLBuffer[] = [];
@@ -456,7 +458,6 @@ export class ModelRenderer {
     private cubeGPUVertexBuffer: GPUBuffer;
     private squareVertexBuffer: WebGLBuffer;
     private brdfLUT: WebGLTexture;
-    private whiteTexture: WebGLTexture;
     private flatNormalTexture: WebGLTexture;
     private defaultOrmTexture: WebGLTexture;
     private gpuBrdfLUT: GPUTexture;
@@ -576,6 +577,7 @@ export class ModelRenderer {
             shadowBias: 0,
             shadowSmoothingStep: 0,
             textures: {},
+            whiteTexture: null,
             gpuTextures: {},
             gpuSamplers: [],
             gpuDepthSampler: null,
@@ -828,7 +830,8 @@ export class ModelRenderer {
             // cache, not by this renderer — another renderer on the same context is very likely
             // still using them. They are released with the context itself, or explicitly through
             // ModelRenderer.releaseSharedResources(gl).
-            this.gl.deleteTexture(this.whiteTexture);
+            this.gl.deleteTexture(this.rendererData.whiteTexture);
+            this.rendererData.whiteTexture = null;
             this.gl.deleteTexture(this.flatNormalTexture);
             this.gl.deleteTexture(this.defaultOrmTexture);
 
@@ -906,7 +909,7 @@ export class ModelRenderer {
             return texture;
         };
 
-        this.whiteTexture = make(255, 255, 255, 255);
+        this.rendererData.whiteTexture = make(255, 255, 255, 255);
         // Flat tangent-space normal (0, 0, 1).
         this.flatNormalTexture = make(128, 128, 255, 255);
         // The HD shader reads ORM as occlusion.r / roughness.g / metallic.b / teamColorFactor.a,
@@ -1353,6 +1356,13 @@ export class ModelRenderer {
     }
 
     public setTextureCompressedImage (path: string, format: DDS_FORMAT, imageData: ArrayBuffer, ddsInfo: DdsInfo): void {
+        if (!ddsInfo.images.length) throw new Error('DDS contains no image levels');
+        if (!this.supportedCompressedFormats) {
+            this.gl.getExtension('WEBGL_compressed_texture_s3tc');
+            this.gl.getExtension('EXT_texture_compression_rgtc');
+            this.supportedCompressedFormats = new Set(this.gl.getParameter(this.gl.COMPRESSED_TEXTURE_FORMATS) as number[]);
+        }
+        if (!this.supportedCompressedFormats.has(format)) throw new Error('Compressed texture format is unsupported by this context');
         if (this.textureSizeLimit && ddsInfo.images.length) {
             const level = textureMipLevel(ddsInfo.images[0].shape.width, ddsInfo.images[0].shape.height, ddsInfo.images.length, this.textureSizeLimit);
             ddsInfo = {...ddsInfo, images: ddsInfo.images.slice(level)};
@@ -4976,8 +4986,12 @@ export class ModelRenderer {
 
         this.applyLayerState(layer);
 
+        this.gl.activeTexture(this.gl.TEXTURE0);
+        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image] || this.rendererData.whiteTexture);
+        this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
+        this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, 0);
+
         if (texture.Image) {
-            this.gl.activeTexture(this.gl.TEXTURE0);
             const glTexture = this.rendererData.textures[texture.Image];
             if (!glTexture && this.debugEnabled) {
                 this.debugLogOnce(`sd-missing-bind:${materialID}:${layerIndex}:${texture.Image}`, 'Missing SD texture at bind', {
@@ -4988,9 +5002,6 @@ export class ModelRenderer {
                     loadedTextureCount: Object.keys(this.rendererData.textures).length,
                 });
             }
-            this.gl.bindTexture(this.gl.TEXTURE_2D, glTexture || this.whiteTexture);
-            this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
-            this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, 0);
         } else if (texture.ReplaceableId === 1 || texture.ReplaceableId === 2) {
             this.gl.uniform3fv(this.shaderProgramLocations.replaceableColorUniform, this.rendererData.teamColor);
             this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, texture.ReplaceableId);
@@ -5008,7 +5019,7 @@ export class ModelRenderer {
                 loadedTextureCount: Object.keys(this.rendererData.textures).length,
             });
         }
-        this.gl.bindTexture(this.gl.TEXTURE_2D, glMaskTexture || this.whiteTexture);
+        this.gl.bindTexture(this.gl.TEXTURE_2D, glMaskTexture || this.rendererData.whiteTexture);
         this.gl.uniform1i(this.shaderProgramLocations.maskSamplerUniform, 1);
         this.gl.uniform1f(this.shaderProgramLocations.useReplaceableMaskUniform, maskTexture ? 1 : 0);
         this.gl.uniform1f(this.shaderProgramLocations.layerAlphaUniform, this.getLayerAlpha(layer));
@@ -5049,7 +5060,7 @@ export class ModelRenderer {
                 loadedTextureCount: Object.keys(this.rendererData.textures).length,
             });
         }
-        this.gl.bindTexture(this.gl.TEXTURE_2D, glDiffuseTexture || this.whiteTexture);
+        this.gl.bindTexture(this.gl.TEXTURE_2D, glDiffuseTexture || this.rendererData.whiteTexture);
         this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
 
 
