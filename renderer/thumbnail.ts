@@ -259,29 +259,32 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
         // Transparent texture regions can make geometric bounds much larger than the visible
         // subject (notably portraits). Reframe on the GPU rather than enlarging a blurry crop.
         if (background.every(channel => channel === 0)) {
-            // Read horizontal strips so even an 8192² backing buffer needs at most 1 MiB
-            // of contiguous CPU memory for visibility measurement.
-            const tileRows = Math.min(canvas.height, Math.max(1, Math.floor(256 * 1024 / canvas.width)));
-            const pixels = new Uint8Array(canvas.width * tileRows * 4);
+            // Downsample before readback: both CPU memory and synchronous scanning stay
+            // bounded even when the requested supersampled backing buffer is very large.
+            const scale = Math.min(1, 512 / Math.max(canvas.width, canvas.height));
+            const measureWidth = Math.max(1, Math.round(canvas.width * scale));
+            const measureHeight = Math.max(1, Math.round(canvas.height * scale));
+            const measurement = newCanvas(measureWidth, measureHeight);
+            const measurementContext = measurement.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+            if (!measurementContext) throw new Error('Unable to create thumbnail measurement canvas');
             for (let attempt = 0; attempt < 2; ++attempt) {
-                let minX = canvas.width, minY = canvas.height, maxX = -1, maxY = -1, count = 0;
-                for (let row = 0; row < canvas.height; row += tileRows) {
-                    const rows = Math.min(tileRows, canvas.height - row);
-                    gl.readPixels(0, row, canvas.width, rows, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-                    for (let offset = 0; offset < canvas.width * rows * 4; offset += 4) {
-                        if (Math.max(pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3]) <= 12) continue;
-                        const pixel = offset / 4, x = pixel % canvas.width, y = row + Math.floor(pixel / canvas.width);
-                        minX = Math.min(minX, x); maxX = Math.max(maxX, x);
-                        minY = Math.min(minY, y); maxY = Math.max(maxY, y);
-                        count++;
-                    }
+                measurementContext.clearRect(0, 0, measureWidth, measureHeight);
+                measurementContext.drawImage(canvas, 0, 0, measureWidth, measureHeight);
+                const pixels = measurementContext.getImageData(0, 0, measureWidth, measureHeight).data;
+                let minX = measureWidth, minY = measureHeight, maxX = -1, maxY = -1, count = 0;
+                for (let offset = 0; offset < pixels.length; offset += 4) {
+                    if (Math.max(pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3]) <= 12) continue;
+                    const pixel = offset / 4, x = pixel % measureWidth, y = Math.floor(pixel / measureWidth);
+                    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+                    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+                    count++;
                 }
-                const span = Math.max((maxX - minX + 1) / canvas.width, (maxY - minY + 1) / canvas.height);
+                const span = Math.max((maxX - minX + 1) / measureWidth, (maxY - minY + 1) / measureHeight);
                 const target = 1 - 2 * (options.padding ?? 0.08);
                 if (count < 4 || span >= target * 0.75) break;
                 const zoom = Math.min(16, target / span);
-                const centerX = (minX + maxX + 1) / canvas.width - 1;
-                const centerY = (minY + maxY + 1) / canvas.height - 1;
+                const centerX = (minX + maxX + 1) / measureWidth - 1;
+                const centerY = 1 - (minY + maxY + 1) / measureHeight;
                 for (const index of [0, 4, 8]) camera.projection[index] *= zoom;
                 for (const index of [1, 5, 9]) camera.projection[index] *= zoom;
                 camera.projection[12] = (camera.projection[12] - centerX) * zoom;
