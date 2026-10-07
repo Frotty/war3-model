@@ -42,6 +42,13 @@ try {
  const cropPixels=await rgba(cropped);let cropCount=0;
  for(let i=3;i<cropPixels.length;i+=4)if(cropPixels[i]>128)cropCount++;
  check(cropCount>5000,'Transparent texture margins are framed using rendered pixels');
+ const readbackCanvas=document.createElement('canvas');
+ const readbackGL=readbackCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
+ const readPixels=readbackGL.readPixels.bind(readbackGL);let maximumReadback=0;
+ readbackGL.readPixels=(...args)=>{maximumReadback=Math.max(maximumReadback,args[6].byteLength);return readPixels(...args);};
+ await renderModelThumbnail(parseMDL(source),{...options,width:512,height:512,canvas:readbackCanvas});
+ check(maximumReadback>0&&maximumReadback<=1024*1024,'Large captures bound CPU visibility readback to one MiB');
+ readbackGL.getExtension('WEBGL_lose_context')?.loseContext();
  model.Materials[0].Layers[0].Shading|=1;
  const unshaded=await renderModelThumbnail(model,options);const b=await rgba(unshaded);
  check(Math.max(...b.filter((v,i)=>i%4===0))===255,'Unshaded bypasses lighting');

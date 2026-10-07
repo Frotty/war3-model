@@ -259,16 +259,22 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
         // Transparent texture regions can make geometric bounds much larger than the visible
         // subject (notably portraits). Reframe on the GPU rather than enlarging a blurry crop.
         if (background.every(channel => channel === 0)) {
-            const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+            // Read horizontal strips so even an 8192² backing buffer needs at most 1 MiB
+            // of contiguous CPU memory for visibility measurement.
+            const tileRows = Math.min(canvas.height, Math.max(1, Math.floor(256 * 1024 / canvas.width)));
+            const pixels = new Uint8Array(canvas.width * tileRows * 4);
             for (let attempt = 0; attempt < 2; ++attempt) {
-                gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
                 let minX = canvas.width, minY = canvas.height, maxX = -1, maxY = -1, count = 0;
-                for (let offset = 0; offset < pixels.length; offset += 4) {
-                    if (Math.max(pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3]) <= 12) continue;
-                    const pixel = offset / 4, x = pixel % canvas.width, y = Math.floor(pixel / canvas.width);
-                    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
-                    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
-                    count++;
+                for (let row = 0; row < canvas.height; row += tileRows) {
+                    const rows = Math.min(tileRows, canvas.height - row);
+                    gl.readPixels(0, row, canvas.width, rows, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+                    for (let offset = 0; offset < canvas.width * rows * 4; offset += 4) {
+                        if (Math.max(pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3]) <= 12) continue;
+                        const pixel = offset / 4, x = pixel % canvas.width, y = row + Math.floor(pixel / canvas.width);
+                        minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+                        minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+                        count++;
+                    }
                 }
                 const span = Math.max((maxX - minX + 1) / canvas.width, (maxY - minY + 1) / canvas.height);
                 const target = 1 - 2 * (options.padding ?? 0.08);
