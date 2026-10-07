@@ -48,19 +48,25 @@ try {
   loadTexture:async()=>({type:'imageData',imageData:[new ImageData(transparentPixels,64,64)]})});
  const offsetPixels=await rgba(offsetCrop);let offsetCount=0;
  for(let i=3;i<offsetPixels.length;i+=4)if(offsetPixels[i]>128)offsetCount++;
- check(offsetCount>5000,'Visibility downsampling recenters off-center texture subjects vertically');
+ check(offsetCount>5000,'Reduced-resolution visibility recenters off-center texture subjects vertically');
+ const additiveModel=parseMDL(source);additiveModel.Materials[0].Layers[0].FilterMode=3;
+ const additiveCanvas=document.createElement('canvas');const additiveGL=additiveCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
+ await renderModelThumbnail(additiveModel,{...options,width:128,height:128,supersampling:1,canvas:additiveCanvas,
+  loadTexture:async()=>({type:'imageData',imageData:[new ImageData(transparentPixels,64,64)]})});
+ const additivePixels=new Uint8Array(128*128*4);additiveGL.readPixels(0,0,128,128,additiveGL.RGBA,additiveGL.UNSIGNED_BYTE,additivePixels);
+ let additiveCount=0;for(let i=0;i<additivePixels.length;i+=4)if(Math.max(additivePixels[i],additivePixels[i+1],additivePixels[i+2])>128)additiveCount++;
+ check(additiveCount>5000,'Visibility framing preserves additive RGB with zero destination alpha');
+ additiveGL.getExtension('WEBGL_lose_context')?.loseContext();
  const readbackCanvas=document.createElement('canvas');
  const readbackGL=readbackCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
  const readPixels=readbackGL.readPixels.bind(readbackGL);let maximumReadback=0,measuredPixels=0;
  readbackGL.readPixels=(...args)=>{maximumReadback=Math.max(maximumReadback,args[6].byteLength);measuredPixels+=args[2]*args[3];return readPixels(...args);};
- const measurementPrototype=typeof OffscreenCanvasRenderingContext2D==='undefined'?CanvasRenderingContext2D.prototype:OffscreenCanvasRenderingContext2D.prototype;
- const getImageData=measurementPrototype.getImageData;
- measurementPrototype.getImageData=function(...args){maximumReadback=Math.max(maximumReadback,args[2]*args[3]*4);measuredPixels+=args[2]*args[3];return getImageData.apply(this,args);};
- try {
- await renderModelThumbnail(parseMDL(source),{...options,width:512,height:512,canvas:readbackCanvas});
+ const largeCapture=await renderModelThumbnail(parseMDL(source),{...options,width:512,height:512,canvas:readbackCanvas});
  check(maximumReadback>0&&maximumReadback<=1024*1024,'Large captures bound CPU visibility readback to one MiB');
  check(measuredPixels>0&&measuredPixels<=2*512*512,'Large captures scan at most two 512-square visibility images');
- } finally {measurementPrototype.getImageData=getImageData;}
+ const largePixels=await rgba(largeCapture);let largeCount=0;
+ for(let i=3;i<largePixels.length;i+=4)if(largePixels[i]>128)largeCount++;
+ check(largeCount>70000,'Large captures redraw the fitted subject at full output resolution');
  readbackGL.getExtension('WEBGL_lose_context')?.loseContext();
  model.Materials[0].Layers[0].Shading|=1;
  const unshaded=await renderModelThumbnail(model,options);const b=await rgba(unshaded);
