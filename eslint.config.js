@@ -7,6 +7,7 @@ export default tseslint.config(
       'dist/',
       'docs/dist/',
       'node_modules/',
+      '_build/',
       '*.js',
       'third_party/decoder.js',
     ],

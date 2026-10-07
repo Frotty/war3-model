@@ -14,6 +14,7 @@ TypeScript-based mdl/mdx (Warcraft 3 model formats) converter/renderer
 * [Usage in browser as ES Module directly](docs/browser-es.md)
 * [Exported APIs](docs/interface.md)
 * [How to render model in browser](docs/how-to-render.md)
+* [Game-data thumbnail stress test](test/game-data-thumbnails.md)
 
 ```bash
 npm i war3-model --save

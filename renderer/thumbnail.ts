@@ -256,6 +256,35 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
         gl.depthMask(true);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         await renderer.renderAsync(camera.view, camera.projection, {...options, levelOfDetail});
+        // Transparent texture regions can make geometric bounds much larger than the visible
+        // subject (notably portraits). Reframe on the GPU rather than enlarging a blurry crop.
+        if (background.every(channel => channel === 0)) {
+            const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+            for (let attempt = 0; attempt < 2; ++attempt) {
+                gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+                let minX = canvas.width, minY = canvas.height, maxX = -1, maxY = -1, count = 0;
+                for (let offset = 0; offset < pixels.length; offset += 4) {
+                    if (Math.max(pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3]) <= 12) continue;
+                    const pixel = offset / 4, x = pixel % canvas.width, y = Math.floor(pixel / canvas.width);
+                    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+                    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+                    count++;
+                }
+                const span = Math.max((maxX - minX + 1) / canvas.width, (maxY - minY + 1) / canvas.height);
+                const target = 1 - 2 * (options.padding ?? 0.08);
+                if (count < 4 || span >= target * 0.75) break;
+                const zoom = Math.min(16, target / span);
+                const centerX = (minX + maxX + 1) / canvas.width - 1;
+                const centerY = (minY + maxY + 1) / canvas.height - 1;
+                for (const index of [0, 4, 8]) camera.projection[index] *= zoom;
+                for (const index of [1, 5, 9]) camera.projection[index] *= zoom;
+                camera.projection[12] = (camera.projection[12] - centerX) * zoom;
+                camera.projection[13] = (camera.projection[13] - centerY) * zoom;
+                gl.depthMask(true);
+                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                await renderer.renderAsync(camera.view, camera.projection, {...options, levelOfDetail});
+            }
+        }
         // Copy to a separate canvas before encoding; a reusable GL canvas may render another model later.
         const output = newCanvas(width, height);
         const context = output.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;

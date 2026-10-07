@@ -35,6 +35,13 @@ try {
  for(let i=0;i<a.length;i+=4){if(a[i+3]>200){count++;max=Math.max(max,a[i]);}}
  check(count>2000,'Visible framing ignores oversized authored extents');
  check(max>190&&max<250,'Bright SD lighting is applied to normally shaded layers');
+ const transparentPixels=new Uint8ClampedArray(64*64*4);
+ for(let y=27;y<37;y++)for(let x=27;x<37;x++)transparentPixels.set([255,255,255,255],(y*64+x)*4);
+ const cropped=await renderModelThumbnail(parseMDL(source),{...options,width:128,height:128,
+  loadTexture:async()=>({type:'imageData',imageData:[new ImageData(transparentPixels,64,64)]})});
+ const cropPixels=await rgba(cropped);let cropCount=0;
+ for(let i=3;i<cropPixels.length;i+=4)if(cropPixels[i]>128)cropCount++;
+ check(cropCount>5000,'Transparent texture margins are framed using rendered pixels');
  model.Materials[0].Layers[0].Shading|=1;
  const unshaded=await renderModelThumbnail(model,options);const b=await rgba(unshaded);
  check(Math.max(...b.filter((v,i)=>i%4===0))===255,'Unshaded bypasses lighting');
