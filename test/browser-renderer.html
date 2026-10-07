@@ -35,6 +35,9 @@ try {
  for(let i=0;i<a.length;i+=4){if(a[i+3]>200){count++;max=Math.max(max,a[i]);}}
  check(count>2000,'Visible framing ignores oversized authored extents');
  check(max>190&&max<250,'Bright SD lighting is applied to normally shaded layers');
+ const fitted=await renderModelThumbnail(parseMDL(source),{...options,zoom:1});const fittedPixels=await rgba(fitted);
+ let fittedCount=0;for(let i=3;i<fittedPixels.length;i+=4)if(fittedPixels[i]>200)fittedCount++;
+ check(count>fittedCount*1.15,'Default thumbnail zoom shows more detail than the uncropped zoom=1 fit');
  const transparentPixels=new Uint8ClampedArray(64*64*4);
  for(let y=27;y<37;y++)for(let x=27;x<37;x++)transparentPixels.set([255,255,255,255],(y*64+x)*4);
  const cropped=await renderModelThumbnail(parseMDL(source),{...options,width:128,height:128,
@@ -221,6 +224,13 @@ try {
  check(shortBurst.frame<400&&(await rgba(shortBurst)).some((value,index)=>index%4===3&&value>100),
   'Short squirt effects are captured after emission before their particles expire');
  particle.Squirt=false;particle.LifeSpan=2;particle.EmissionRate=30;particleModel.Sequences[0].Interval[1]=1000;
+ const lateMesh=parseMDL(source);lateMesh.Sequences[0].Interval[1]=10000;
+ lateMesh.GeosetAnims=lateMesh.Geosets.map((_,GeosetId)=>({GeosetId,Flags:0,Color:new Float32Array([1,1,1]),
+  Alpha:{Frames:new Uint32Array([0,3000]),Values:new Float32Array([0,1]),VectorSize:1,LineType:0,GlobalSeqId:null}}));
+ const hiddenEmitter={...particle,Visibility:0};lateMesh.Nodes.push(hiddenEmitter);lateMesh.ParticleEmitters2=[hiddenEmitter];
+ const lateCapture=await renderModelThumbnail(lateMesh,options);
+ check(lateCapture.frame>=3000&&(await rgba(lateCapture)).some((value,index)=>index%4===3&&value>100),
+  'Hidden effect declarations do not suppress late visible mesh frame search');
  const fallbackParticle=await renderModelThumbnail(particleModel,{...options,warmupMs:500,allowMissingTextures:true,
   loadTexture:async()=>{throw new Error('Unavailable effect texture');}});
  const particlePixels=await rgba(fallbackParticle);

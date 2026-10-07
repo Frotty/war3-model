@@ -29,6 +29,8 @@ export interface ThumbnailOptions extends WaitOptions {
     warmupMs?: number;
     levelOfDetail?: number;
     padding?: number;
+    /** Detail-oriented framing multiplier; defaults to 1.2. Set 1 for an uncropped fit. */
+    zoom?: number;
     /** Direction from the model toward the camera in WC3's Z-up coordinate system. */
     cameraDirection?: vec3;
     background?: [number, number, number, number];
@@ -174,10 +176,10 @@ async function renderThumbnail (model: Model, options: ThumbnailOptions, cache?:
 }
 
 async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?: ThumbnailCache): Promise<ThumbnailResult> {
-    const {width, height, supersampling = 2, levelOfDetail = 0, warmupMs = 0} = options;
+    const {width, height, supersampling = 2, levelOfDetail = 0, warmupMs = 0, zoom = 1.2} = options;
     if (![width, height, supersampling].every(value => Number.isInteger(value) && value > 0) ||
         width * supersampling > 8192 || height * supersampling > 8192 ||
-        !Number.isFinite(warmupMs) || warmupMs < 0 || warmupMs > 10000) {
+        !Number.isFinite(warmupMs) || warmupMs < 0 || warmupMs > 10000 || !Number.isFinite(zoom) || zoom <= 0 || zoom > 4) {
         throw new Error('Invalid thumbnail size, supersampling, or warmup');
     }
     // Acquire limits on a tiny backing buffer before allocating the requested capture size.
@@ -269,6 +271,14 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
             simulate(250);
             bounds = renderer.getVisibleBounds({levelOfDetail});
         }
+        // Hidden/irrelevant emitters must not suppress the mesh's ordinary pose search.
+        // This adds no effect simulation and only runs after the short effect budget fails.
+        if (!bounds && automaticEffects && model.Geosets.length > 0) {
+            for (let step = 1; step <= 16 && !bounds; ++step) {
+                renderer.setPose(sequence, duration * step / 16);
+                bounds = renderer.getVisibleBounds({levelOfDetail, includeEffects: false});
+            }
+        }
         if (!bounds) throw new Error('The selected pose has no visible geometry; try warmupMs for particle-only models');
         // Billboards change bounds when the camera changes. Refit their evaluated pose as well.
         let camera = fitThumbnailCamera(bounds, width, height, options.cameraDirection, options.padding);
@@ -279,6 +289,7 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
             camera = fitThumbnailCamera(bounds, width, height, options.cameraDirection, options.padding);
         }
         renderer.setCamera(camera.position, camera.rotation);
+        for (const index of [0, 1, 4, 5, 8, 9, 12, 13]) camera.projection[index] *= zoom;
         const background = options.background || [0, 0, 0, 0];
         // Measure a small render directly in GL so additive RGB survives zero alpha.
         // CPU readback and scanning stay bounded independently of the capture resolution.
@@ -306,15 +317,15 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
                     count++;
                 }
                 const span = Math.max((maxX - minX + 1) / measureWidth, (maxY - minY + 1) / measureHeight);
-                const target = 1 - 2 * (options.padding ?? 0.08);
-                if (count < 4 || span >= target * 0.75) break;
-                const zoom = Math.min(16, target / span);
+                const target = (1 - 2 * (options.padding ?? 0.08)) * zoom;
+                if (count < 4 || span >= target * 0.95) break;
+                const refitZoom = Math.min(16, target / span);
                 const centerX = (minX + maxX + 1) / measureWidth - 1;
                 const centerY = (minY + maxY + 1) / measureHeight - 1;
-                for (const index of [0, 4, 8]) camera.projection[index] *= zoom;
-                for (const index of [1, 5, 9]) camera.projection[index] *= zoom;
-                camera.projection[12] = (camera.projection[12] - centerX) * zoom;
-                camera.projection[13] = (camera.projection[13] - centerY) * zoom;
+                for (const index of [0, 4, 8]) camera.projection[index] *= refitZoom;
+                for (const index of [1, 5, 9]) camera.projection[index] *= refitZoom;
+                camera.projection[12] = (camera.projection[12] - centerX) * refitZoom;
+                camera.projection[13] = (camera.projection[13] - centerY) * refitZoom;
                 gl.depthMask(true);
                 gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
                 await renderer.renderAsync(camera.view, camera.projection, {...options, levelOfDetail});
