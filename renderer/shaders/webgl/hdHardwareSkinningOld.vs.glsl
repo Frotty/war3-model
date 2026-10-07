@@ -20,11 +20,11 @@ void main(void) {
     vec4 position = vec4(aVertexPosition, 1.0);
     mat4 sum = mat4(0.0);
 
-    // sum += uNodesMatrices[int(aSkin[0])] * 1.;
-    sum += uNodesMatrices[int(aSkin[0])] * aBoneWeight[0];
-    sum += uNodesMatrices[int(aSkin[1])] * aBoneWeight[1];
-    sum += uNodesMatrices[int(aSkin[2])] * aBoneWeight[2];
-    sum += uNodesMatrices[int(aSkin[3])] * aBoneWeight[3];
+    vec4 weights = aBoneWeight / 255.0;
+    sum += uNodesMatrices[int(aSkin[0])] * weights[0];
+    sum += uNodesMatrices[int(aSkin[1])] * weights[1];
+    sum += uNodesMatrices[int(aSkin[2])] * weights[2];
+    sum += uNodesMatrices[int(aSkin[3])] * weights[3];
 
     mat3 rotation = mat3(sum);
 

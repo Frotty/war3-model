@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {Buffer} from 'node:buffer';
-import {parseMDX, generateMDX} from '../dist/es/war3-model.mjs';
+import {parseMDX, generateMDX, parseMDL, generateMDL} from '../dist/es/war3-model.mjs';
 
 function chunk(tag, data) {
     const header = Buffer.alloc(8);
@@ -18,6 +18,40 @@ function model(version, ...chunks) {
     return Buffer.concat([Buffer.from('MDLX'), chunk('VERS', vers), chunk('MODL', Buffer.alloc(372)), ...chunks]);
 }
 const parse = bytes => parseMDX(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+
+// Independent binary fixture: v1800's SKIN count is an element count, while the
+// payload contains uint16 bone IDs and weights. UVAS must follow all 16 bytes.
+function skinGeoset(version) {
+    const uint32 = (...values) => {
+        const bytes = Buffer.alloc(values.length * 4);
+        values.forEach((value, index) => bytes.writeUInt32LE(value, index * 4));
+        return bytes;
+    };
+    const skin = [version >= 1800 ? 300 : 3, 2, 1, 0, 122, 107, 26, 0];
+    const array = (tag, count, bytes) => Buffer.concat([Buffer.from(tag), uint32(count), bytes]);
+    const skinBytes = Buffer.alloc(version >= 1800 ? 16 : 8);
+    skin.forEach((value, index) => version >= 1800 ? skinBytes.writeUInt16LE(value, index * 2) : skinBytes.writeUInt8(value, index));
+    const payload = Buffer.concat([
+        array('VRTX', 1, Buffer.alloc(12)), array('NRMS', 1, Buffer.alloc(12)),
+        array('PTYP', 1, uint32(4)), array('PCNT', 1, uint32(3)), array('PVTX', 3, Buffer.alloc(6)),
+        array('GNDX', 0, Buffer.alloc(0)), array('MTGC', 1, uint32(1)), array('MATS', 1, uint32(0)),
+        uint32(0, 0, 0, 0), Buffer.alloc(80), Buffer.alloc(28), uint32(0),
+        // chunk() normally writes a byte length; SKIN intentionally writes 8 here.
+        Buffer.from('SKIN'), uint32(8), skinBytes,
+        Buffer.from('UVAS'), uint32(1), array('UVBS', 1, Buffer.alloc(8)),
+    ]);
+    return {bytes: model(version, chunk('GEOS', Buffer.concat([uint32(payload.length + 4), payload]))), skin};
+}
+for (const version of [1200, 1800]) {
+    const fixture = skinGeoset(version);
+    const parsed = parse(fixture.bytes);
+    assert.deepEqual([...parsed.Geosets[0].SkinWeights], fixture.skin, `v${version} skin elements`);
+    assert.equal(parsed.Geosets[0].SkinWeights.BYTES_PER_ELEMENT, version >= 1800 ? 2 : 1);
+    assert.equal(parsed.Geosets[0].TVertices[0].length, 2, 'UVAS starts after the entire skin payload');
+    assert.deepEqual([...parseMDX(generateMDX(parsed)).Geosets[0].SkinWeights], fixture.skin, 'MDX round trip preserves wide bone IDs');
+    assert.deepEqual([...parseMDL(generateMDL(parsed)).Geosets[0].SkinWeights], fixture.skin, 'MDL round trip preserves wide bone IDs');
+    console.log(`ok - v${version} skin storage and UV alignment survive MDX/MDL round trips`);
+}
 
 const light = Buffer.alloc(172);
 light.writeUInt32LE(light.length + 24, 0); light.writeUInt32LE(96, 4);

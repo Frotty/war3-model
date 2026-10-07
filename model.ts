@@ -277,7 +277,9 @@ export interface Geoset {
     /* Since Version: 900 */
     Tangents?: Float32Array;
     /* Since Version: 900 */
-    SkinWeights?: Uint8Array;
+    // Eight elements per vertex: four bone IDs followed by four weights (sum 255).
+    // MDX v1800 stores each element as a uint16 instead of a uint8.
+    SkinWeights?: Uint8Array | Uint16Array;
 }
 
 export enum GeosetAnimFlags {

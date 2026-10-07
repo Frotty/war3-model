@@ -457,7 +457,9 @@ function parseGeosets (model: Model, state: State, size: number) {
                         throw new Error('Incorrect geoset, multiple SkinWeights');
                     }
                     const len = state.int32();
-                    geoset.SkinWeights = state.uint8Array(len);
+                    // v1800 retains the eight-elements-per-vertex count but doubles
+                    // each element's storage width; weights still sum to 255.
+                    geoset.SkinWeights = model.Version >= 1800 ? state.uint16Array(len) : state.uint8Array(len);
                 } else if (keyword === 'UVAS') {
                     break;
                 }

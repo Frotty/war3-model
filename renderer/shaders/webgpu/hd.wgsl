@@ -42,7 +42,7 @@ struct VSIn {
     @location(2) textureCoord: vec2f,
     @location(3) tangent: vec4f,
     @location(4) skin: vec4<u32>,
-    @location(5) boneWeight: vec4f,
+    @location(5) boneWeight: vec4u,
 }
 
 struct VSOut {
@@ -60,10 +60,11 @@ struct VSOut {
     var position: vec4f = vec4f(in.vertexPosition, 1.0);
     var sum: mat4x4f;
 
-    sum += vsUniforms.nodesMatrices[in.skin[0]] * in.boneWeight[0];
-    sum += vsUniforms.nodesMatrices[in.skin[1]] * in.boneWeight[1];
-    sum += vsUniforms.nodesMatrices[in.skin[2]] * in.boneWeight[2];
-    sum += vsUniforms.nodesMatrices[in.skin[3]] * in.boneWeight[3];
+    let weights = vec4f(in.boneWeight) / 255.0;
+    sum += vsUniforms.nodesMatrices[in.skin[0]] * weights[0];
+    sum += vsUniforms.nodesMatrices[in.skin[1]] * weights[1];
+    sum += vsUniforms.nodesMatrices[in.skin[2]] * weights[2];
+    sum += vsUniforms.nodesMatrices[in.skin[3]] * weights[3];
 
     let rotation: mat3x3f = mat3x3f(sum[0].xyz, sum[1].xyz, sum[2].xyz);
 

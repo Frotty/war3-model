@@ -548,7 +548,7 @@ function byteLengthGeoset (model: Model, geoset: Geoset): number {
         ((model.Version >= 900 && geoset.SkinWeights?.length) ?
             4 /* SKIN keyword */ +
             4 /* SkinWeights count */ +
-            geoset.SkinWeights.length /* SkinWeights data */ :
+            geoset.SkinWeights.length * (model.Version >= 1800 ? 2 : 1) /* SkinWeights data */ :
             0
         ) +
         4 * 7 /* extent */ +
@@ -647,7 +647,8 @@ function generateGeosets (model: Model, stream: Stream): void {
             if (geoset.SkinWeights && geoset.SkinWeights.length) {
                 stream.keyword('SKIN');
                 stream.int32(geoset.SkinWeights.length);
-                stream.uint8Array(geoset.SkinWeights);
+                if (model.Version >= 1800) stream.uint16Array(new Uint16Array(geoset.SkinWeights));
+                else stream.uint8Array(new Uint8Array(geoset.SkinWeights));
             }
         }
 

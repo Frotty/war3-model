@@ -62,7 +62,7 @@ function generateNumber (val: number): string {
         .replace(negativeZeroRegExp, '0');
 }
 
-function generateArray (arr: Float32Array|Int32Array|Uint32Array|Uint8Array, reverse = false): string {
+function generateArray (arr: Float32Array|Int32Array|Uint32Array|Uint8Array|Uint16Array, reverse = false): string {
     let middle = '';
 
     if (reverse) {
@@ -426,7 +426,7 @@ function generateGeosetChunk (model: Model, geoset: Geoset): string {
         generateBlockEnd();
 }
 
-function generateGeosetArray (name: string, arr: Float32Array|Uint8Array, elemLength: number): string {
+function generateGeosetArray (name: string, arr: Float32Array|Uint8Array|Uint16Array, elemLength: number): string {
     let middle = '';
     const elemCount = arr.length / elemLength;
 
