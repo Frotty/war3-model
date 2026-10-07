@@ -543,12 +543,13 @@ function parseMaterials (state: State, model: Model): void {
 
 enum GeosetPartType {
     INT,
+    INT16,
     FLOAT
 }
 
 function parseGeosetPart (state: State, countPerObj: number, type: GeosetPartType) {
     const count = parseNumber(state);
-    const arr = new (type === GeosetPartType.FLOAT ? Float32Array : Uint8Array)(count * countPerObj);
+    const arr = new (type === GeosetPartType.FLOAT ? Float32Array : type === GeosetPartType.INT16 ? Uint16Array : Uint8Array)(count * countPerObj);
 
     strictParseSymbol(state, '{');
 
@@ -682,7 +683,7 @@ function parseGeoset (state: State, model: Model): void {
             } else if (keyword === 'Tangents') {
                 res.Tangents = parseGeosetPart(state, 4, GeosetPartType.FLOAT) as Float32Array;
             } else if (keyword === 'SkinWeights') {
-                res.SkinWeights = parseGeosetPart(state, 8, GeosetPartType.INT) as Uint8Array;
+                res.SkinWeights = parseGeosetPart(state, 8, model.Version >= 1800 ? GeosetPartType.INT16 : GeosetPartType.INT) as Uint8Array | Uint16Array;
             }
         }
     }

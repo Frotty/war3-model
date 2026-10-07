@@ -2215,8 +2215,10 @@ export class ModelRenderer {
                     this.gl.vertexAttribPointer(this.shaderProgramLocations.textureCoordAttribute, 2, this.gl.FLOAT, false, 0, 0);
 
                     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.skinWeightBuffer[i]);
-                    this.gl.vertexAttribPointer(this.shaderProgramLocations.skinAttribute, 4, this.gl.UNSIGNED_BYTE, false, 8, 0);
-                    this.gl.vertexAttribPointer(this.shaderProgramLocations.weightAttribute, 4, this.gl.UNSIGNED_BYTE, true, 8, 4);
+                    const skinBytes = geoset.SkinWeights.BYTES_PER_ELEMENT;
+                    const skinType = skinBytes === 2 ? this.gl.UNSIGNED_SHORT : this.gl.UNSIGNED_BYTE;
+                    this.gl.vertexAttribPointer(this.shaderProgramLocations.skinAttribute, 4, skinType, false, 8 * skinBytes, 0);
+                    this.gl.vertexAttribPointer(this.shaderProgramLocations.weightAttribute, 4, skinType, false, 8 * skinBytes, 4 * skinBytes);
 
                     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.tangentBuffer[i]);
                     this.gl.vertexAttribPointer(this.shaderProgramLocations.tangentAttribute, 4, this.gl.FLOAT, false, 0, 0);
@@ -3869,9 +3871,11 @@ export class ModelRenderer {
         if (this.isHD) {
             gl.bindBuffer(gl.ARRAY_BUFFER, this.skinWeightBuffer[i]);
             gl.enableVertexAttribArray(loc.skinAttribute);
-            gl.vertexAttribPointer(loc.skinAttribute, 4, gl.UNSIGNED_BYTE, false, 8, 0);
+            const skinBytes = this.model.Geosets[i].SkinWeights.BYTES_PER_ELEMENT;
+            const skinType = skinBytes === 2 ? gl.UNSIGNED_SHORT : gl.UNSIGNED_BYTE;
+            gl.vertexAttribPointer(loc.skinAttribute, 4, skinType, false, 8 * skinBytes, 0);
             gl.enableVertexAttribArray(loc.weightAttribute);
-            gl.vertexAttribPointer(loc.weightAttribute, 4, gl.UNSIGNED_BYTE, true, 8, 4);
+            gl.vertexAttribPointer(loc.weightAttribute, 4, skinType, false, 8 * skinBytes, 4 * skinBytes);
 
             gl.bindBuffer(gl.ARRAY_BUFFER, this.tangentBuffer[i]);
             gl.enableVertexAttribArray(loc.tangentAttribute);
@@ -3934,19 +3938,19 @@ export class ModelRenderer {
                     }]
                 }, {
                     // skin
-                    arrayStride: 8,
+                    arrayStride: 16,
                     attributes: [{
                         shaderLocation: 4,
                         offset: 0,
-                        format: 'uint8x4' as const
+                        format: 'uint16x4' as const
                     }]
                 }, {
                     // boneWeight
-                    arrayStride: 8,
+                    arrayStride: 16,
                     attributes: [{
                         shaderLocation: 5,
-                        offset: 4,
-                        format: 'unorm8x4' as const
+                        offset: 8,
+                        format: 'uint16x4' as const
                     }]
                 }] : [{
                     // group
@@ -4285,11 +4289,11 @@ export class ModelRenderer {
             if (this.isHD) {
                 this.gpuSkinWeightBuffer[i] = this.device.createBuffer({
                     label: `SkinWeight ${i}`,
-                    size: geoset.SkinWeights.byteLength,
+                    size: geoset.SkinWeights.length * 2,
                     usage: GPUBufferUsage.VERTEX,
                     mappedAtCreation: true
                 });
-                new Uint8Array(
+                new Uint16Array(
                     this.gpuSkinWeightBuffer[i].getMappedRange(0, this.gpuSkinWeightBuffer[i].size)
                 ).set(geoset.SkinWeights);
                 this.gpuSkinWeightBuffer[i].unmap();

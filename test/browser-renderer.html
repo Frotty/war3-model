@@ -29,6 +29,25 @@ async function rgba(result) {const img=await show(result,'synthetic'); const can
 try {
  const model=parseMDL(source);
  const options={width:128,height:96,loadTexture:async()=>white,cameraDirection:[0,0,1]};
+ const hdModel=parseMDL(source);hdModel.Version=1800;
+ hdModel.Materials[0].Layers[0].ShaderTypeId=1;
+ hdModel.Nodes.push({ObjectId:1,Flags:0,PivotPoint:new Float32Array(3),
+  Translation:{Frames:new Uint32Array([0]),Values:new Float32Array([0.5,0,0]),VectorSize:3,LineType:0,GlobalSeqId:null}});
+ hdModel.Geosets[0].Tangents=new Float32Array([1,0,0,1,1,0,0,1,1,0,0,1]);
+ const skinElements=[0,1,0,0,255,0,0,0, 1,0,0,0,255,0,0,0, 0,1,0,0,122,133,0,0];
+ for(const vao of [true,false]) {
+  const initGL=ModelRenderer.prototype.initGL;
+  ModelRenderer.prototype.initGL=function(...args){initGL.apply(this,args);if(!vao)this.useVAO=false;};
+  try {
+   hdModel.Geosets[0].SkinWeights=new Uint8Array(skinElements);
+   const bytePixels=await rgba(await renderModelThumbnail(hdModel,options));
+   hdModel.Geosets[0].SkinWeights=new Uint16Array(skinElements);
+   const widePixels=await rgba(await renderModelThumbnail(hdModel,options));
+   check(widePixels.some((value,index)=>index%4===3&&value>200),`16-bit HD skinning draws visible geometry (VAO=${vao})`);
+   check(bytePixels.every((value,index)=>Math.abs(value-widePixels[index])<=1),
+    `Byte and 16-bit HD skinning produce the same weighted pose (VAO=${vao})`);
+  }finally{ModelRenderer.prototype.initGL=initGL;}
+ }
  const lit=await renderModelThumbnail(model,options);
  check(lit.blob.size>100,'PNG capture succeeds at requested resolution');
  const a=await rgba(lit); let count=0,max=0;
