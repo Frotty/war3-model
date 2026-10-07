@@ -30,9 +30,11 @@
     "dev": "vite",
     "build-lib": "vite build",
     "build-samples": "SAMPLES=1 vite build",
-    "test": "node test/mdx-light.test.mjs && node test/anim-vector.test.mjs && node test/blp-decode.test.mjs && node test/animation-output.test.mjs && node test/geoset-animation.test.mjs && node test/renderer-display.test.mjs",
+    "test": "node test/mdx-light.test.mjs && node test/mdx-extended.test.mjs && node test/anim-vector.test.mjs && node test/blp-decode.test.mjs && node test/animation-output.test.mjs && node test/geoset-animation.test.mjs && node test/renderer-display.test.mjs",
     "typecheck": "tsc --noEmit",
     "test:game-data": "node test/game-data-thumbnails.mjs",
+    "pretest:game-data:parse": "npm run build-lib",
+    "test:game-data:parse": "node test/game-data-thumbnails.mjs --parse-only",
     "test:browser": "node test/browser-renderer.mjs",
     "lint": "eslint --ext .ts ."
   },

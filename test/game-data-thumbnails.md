@@ -52,3 +52,20 @@ Other options: `--size` (16–2048, default 128), `--limit` (default all models)
 can change coverage at antialiased edges, so thresholds deliberately have margin.
 The suite is separate from `npm test` because it needs proprietary installed data.
 `npm run test:browser` runs synthetic renderer regressions without game files.
+
+For parser development, run the complete census without creating a browser or loading textures:
+
+```sh
+npm run test:game-data:parse -- --game "C:/Program Files (x86)/Warcraft III"
+```
+
+This builds the library first, then parses every discovered MDX/MDL. The report
+defaults to `_build/game-data-parser` and records model versions and parse errors.
+The same `--casc`, `--filter`, `--limit` and `--output` options apply. Parsing errors
+are strict failures; chunk exceptions are never swallowed to make a model pass.
+
+The installed-game parser census passed all 14,984 MDX assets after adding the
+v1600/v1700/v1800 light layout and Reforged camera lens tracks. Synthetic tests
+cover these layouts and older v800/v1000/v1100/v1200 lights. Undocumented light
+fields and camera lens tracks retain their binary values/tags for MDX round trips;
+they do not yet have interpreted renderer behavior or MDL text equivalents.
