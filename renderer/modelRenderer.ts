@@ -400,6 +400,8 @@ export class ModelRenderer {
     // Contiguous backing store for the uNodesMatrices[] uniform array, packed by node ObjectId so
     // the whole bone palette uploads in a single uniformMatrix4fv call instead of one per node.
     private nodesMatricesBuffer: Float32Array = new Float32Array(MAX_NODES * 16);
+    private skinPalettes: number[][] = [];
+    private remappedSkins: (Uint8Array | Uint16Array)[] = [];
     private vertexBuffer: WebGLBuffer[] = [];
     private normalBuffer: WebGLBuffer[] = [];
     private vertices: Float32Array[] = []; // Array per geoset for software skinning
@@ -496,6 +498,8 @@ export class ModelRenderer {
     private gpuTangentBuffer: GPUBuffer[] = [];
     private gpuVSUniformsBuffer: GPUBuffer;
     private gpuVSUniformsBindGroup: GPUBindGroup;
+    private gpuSkinVSUniformsBuffers: GPUBuffer[] = [];
+    private gpuSkinVSUniformsBindGroups: GPUBindGroup[] = [];
     private gpuFSUniformsBuffers: GPUBuffer[][] = [];
     private debugMessagesLogged = new Set<string>();
     // Resolved once per renderer. Re-deriving this cost a regex over location.search plus a
@@ -628,6 +632,37 @@ export class ModelRenderer {
             }
         }
 
+        if (this.isHD && (this.rendererData.nodes.length > MAX_NODES || model.Geosets.some(geoset =>
+            geoset.SkinWeights?.some((id, index) => index % 8 < 4 && id >= MAX_NODES)))) {
+            // ObjectIds may be sparse or wider than the shader's uniform palette.
+            // Keep the model/CPU skeleton intact and compact only the uploaded IDs.
+            this.model.Geosets.forEach((geoset, index) => {
+                const source = geoset.SkinWeights;
+                if (!source?.length) return;
+                const palette: number[] = [];
+                const indices = new Map<number, number>();
+                const skin = source instanceof Uint16Array ? new Uint16Array(source) : new Uint8Array(source);
+                for (let vertex = 0; vertex < skin.length; vertex += 8) {
+                    for (let influence = 0; influence < 4; ++influence) {
+                        if (!skin[vertex + influence + 4]) {
+                            skin[vertex + influence] = 0;
+                            continue;
+                        }
+                        const id = source[vertex + influence];
+                        if (!this.rendererData.nodes[id]) throw new Error(`Geoset ${index} references missing bone ${id}`);
+                        if (!indices.has(id)) {
+                            if (palette.length === MAX_NODES) throw new Error(`Geoset ${index} exceeds the ${MAX_NODES}-bone GPU palette limit`);
+                            indices.set(id, palette.length);
+                            palette.push(id);
+                        }
+                        skin[vertex + influence] = indices.get(id);
+                    }
+                }
+                this.skinPalettes[index] = palette;
+                this.remappedSkins[index] = skin;
+            });
+        }
+
         if (model.GlobalSequences) {
             for (let i = 0; i < model.GlobalSequences.length; ++i) {
                 this.rendererData.globalSequencesFrames[i] = 0;
@@ -755,6 +790,7 @@ export class ModelRenderer {
                 buffer?.destroy();
             }
             this.gpuVSUniformsBuffer?.destroy();
+            for (const buffer of this.gpuSkinVSUniformsBuffers) buffer?.destroy();
             for (const materialID in this.gpuFSUniformsBuffers) {
                 for (const buffer of this.gpuFSUniformsBuffers[materialID]) {
                     buffer?.destroy();
@@ -1743,6 +1779,25 @@ export class ModelRenderer {
 
                 this.ensureGeosetGPUBuffers(i);
 
+                let vsBindGroup = this.gpuVSUniformsBindGroup;
+                if (this.skinPalettes[i]) {
+                    if (!this.gpuSkinVSUniformsBuffers[i]) {
+                        const buffer = this.gpuSkinVSUniformsBuffers[i] = this.device.createBuffer({
+                            label: `skin palette uniforms ${i}`,
+                            size: VSUniformsValues.byteLength,
+                            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+                        });
+                        this.gpuSkinVSUniformsBindGroups[i] = this.device.createBindGroup({
+                            layout: this.vsBindGroupLayout,
+                            entries: [{binding: 0, resource: {buffer}}]
+                        });
+                    }
+                    VSUniformsViews.nodesMatrices.fill(0);
+                    this.skinPalettes[i].forEach((id, slot) => VSUniformsViews.nodesMatrices.set(this.rendererData.nodes[id].matrix, slot * 16));
+                    this.device.queue.writeBuffer(this.gpuSkinVSUniformsBuffers[i], 0, VSUniformsValues);
+                    vsBindGroup = this.gpuSkinVSUniformsBindGroups[i];
+                }
+
                 if (wireframe && !this.wireframeIndexGPUBuffer[i]) {
                     this.createWireframeGPUBuffer(i);
                 }
@@ -1918,7 +1973,7 @@ export class ModelRenderer {
                         ]
                     });
 
-                    pass.setBindGroup(0, this.gpuVSUniformsBindGroup);
+                    pass.setBindGroup(0, vsBindGroup);
                     pass.setBindGroup(1, fsBindGroup);
 
                     pass.drawIndexed(wireframe ? geoset.Faces.length * 2 : geoset.Faces.length);
@@ -2041,7 +2096,7 @@ export class ModelRenderer {
                             ]
                         });
 
-                        pass.setBindGroup(0, this.gpuVSUniformsBindGroup);
+                        pass.setBindGroup(0, vsBindGroup);
                         pass.setBindGroup(1, fsBindGroup);
 
                         pass.drawIndexed(wireframe ? geoset.Faces.length * 2 : geoset.Faces.length);
@@ -2097,7 +2152,7 @@ export class ModelRenderer {
             // one contiguous buffer and upload the whole uNodesMatrices[] array in a single call.
             const packed = this.nodesMatricesBuffer;
             const nodes = this.rendererData.nodes;
-            const count = nodes.length;
+            const count = Math.min(nodes.length, MAX_NODES);
             for (let j = 0; j < count; ++j) {
                 if (nodes[j]) {
                     packed.set(nodes[j].matrix, j * 16);
@@ -2155,6 +2210,12 @@ export class ModelRenderer {
             if (!this.isGeosetBatchVisible(batch, levelOfDetail)) continue;
 
             this.ensureGeosetBuffers(i);
+
+            if (this.skinPalettes[i]) {
+                this.skinPalettes[i].forEach((id, slot) => this.nodesMatricesBuffer.set(this.rendererData.nodes[id].matrix, slot * 16));
+                this.gl.uniformMatrix4fv(this.shaderProgramLocations.nodesMatricesAttributes[0], false,
+                    this.nodesMatricesBuffer.subarray(0, Math.max(1, this.skinPalettes[i].length) * 16));
+            }
 
             const geosetColor = this.rendererData.geosetColor[i];
             this.gl.uniform4f(this.shaderProgramLocations.geosetColorUniform,
@@ -3817,7 +3878,7 @@ export class ModelRenderer {
             if (this.isHD) {
                 this.skinWeightBuffer[i] = this.gl.createBuffer();
                 this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.skinWeightBuffer[i]);
-                this.gl.bufferData(this.gl.ARRAY_BUFFER, geoset.SkinWeights, this.gl.STATIC_DRAW);
+                this.gl.bufferData(this.gl.ARRAY_BUFFER, this.remappedSkins[i] || geoset.SkinWeights, this.gl.STATIC_DRAW);
 
                 this.tangentBuffer[i] = this.gl.createBuffer();
                 this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.tangentBuffer[i]);
@@ -4295,7 +4356,7 @@ export class ModelRenderer {
                 });
                 new Uint16Array(
                     this.gpuSkinWeightBuffer[i].getMappedRange(0, this.gpuSkinWeightBuffer[i].size)
-                ).set(geoset.SkinWeights);
+                ).set(this.remappedSkins[i] || geoset.SkinWeights);
                 this.gpuSkinWeightBuffer[i].unmap();
 
                 this.gpuTangentBuffer[i] = this.device.createBuffer({

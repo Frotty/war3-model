@@ -7,7 +7,8 @@ const server = await createServer({configFile: false, server: {host: '127.0.0.1'
 let browser;
 try {
     await server.listen();
-    browser = await chromium.launch({headless: true});
+    browser = await chromium.launch({headless: true, args: process.argv.includes('--webgpu') ?
+        ['--enable-unsafe-webgpu', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] : []});
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/test/browser-renderer.html`);
     await page.waitForFunction(() => document.body.dataset.result, undefined, {timeout: 60000});
