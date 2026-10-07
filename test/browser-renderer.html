@@ -38,6 +38,11 @@ try {
  const fitted=await renderModelThumbnail(parseMDL(source),{...options,zoom:1});const fittedPixels=await rgba(fitted);
  let fittedCount=0;for(let i=3;i<fittedPixels.length;i+=4)if(fittedPixels[i]>200)fittedCount++;
  check(count>fittedCount*1.15,'Default thumbnail zoom shows more detail than the uncropped zoom=1 fit');
+ const highZoomProjections=[];const originalZoomRender=ModelRenderer.prototype.renderAsync;
+ ModelRenderer.prototype.renderAsync=function(view,projection,...args){highZoomProjections.push(projection[0]);return originalZoomRender.call(this,view,projection,...args);};
+ try{await renderModelThumbnail(parseMDL(source),{...options,zoom:4});}finally{ModelRenderer.prototype.renderAsync=originalZoomRender;}
+ check(highZoomProjections.every(value=>Math.abs(value-highZoomProjections[0])<1e-5),
+  'A subject filling the viewport does not compound the requested high zoom');
  const transparentPixels=new Uint8ClampedArray(64*64*4);
  for(let y=27;y<37;y++)for(let x=27;x<37;x++)transparentPixels.set([255,255,255,255],(y*64+x)*4);
  const cropped=await renderModelThumbnail(parseMDL(source),{...options,width:128,height:128,
@@ -231,6 +236,10 @@ try {
  const lateCapture=await renderModelThumbnail(lateMesh,options);
  check(lateCapture.frame>=3000&&(await rgba(lateCapture)).some((value,index)=>index%4===3&&value>100),
   'Hidden effect declarations do not suppress late visible mesh frame search');
+ lateMesh.GeosetAnims[0].Alpha.Frames=new Uint32Array([0,10]);lateMesh.GeosetAnims[0].Alpha.Values=new Float32Array([1,0]);
+ const initialCapture=await renderModelThumbnail(lateMesh,options);
+ check(initialCapture.frame===1&&(await rgba(initialCapture)).some((value,index)=>index%4===3&&value>100),
+  'Empty hidden effects preserve a mesh visible only at the requested initial pose');
  const fallbackParticle=await renderModelThumbnail(particleModel,{...options,warmupMs:500,allowMissingTextures:true,
   loadTexture:async()=>{throw new Error('Unavailable effect texture');}});
  const particlePixels=await rgba(fallbackParticle);

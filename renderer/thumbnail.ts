@@ -274,8 +274,8 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
         // Hidden/irrelevant emitters must not suppress the mesh's ordinary pose search.
         // This adds no effect simulation and only runs after the short effect budget fails.
         if (!bounds && automaticEffects && model.Geosets.length > 0) {
-            for (let step = 1; step <= 16 && !bounds; ++step) {
-                renderer.setPose(sequence, duration * step / 16);
+            for (let step = 0; step <= 16 && !bounds; ++step) {
+                renderer.setPose(sequence, step === 0 ? offset : duration * step / 16);
                 bounds = renderer.getVisibleBounds({levelOfDetail, includeEffects: false});
             }
         }
@@ -317,7 +317,7 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
                     count++;
                 }
                 const span = Math.max((maxX - minX + 1) / measureWidth, (maxY - minY + 1) / measureHeight);
-                const target = (1 - 2 * (options.padding ?? 0.08)) * zoom;
+                const target = Math.min(1, (1 - 2 * (options.padding ?? 0.08)) * zoom);
                 if (count < 4 || span >= target * 0.95) break;
                 const refitZoom = Math.min(16, target / span);
                 const centerX = (minX + maxX + 1) / measureWidth - 1;
