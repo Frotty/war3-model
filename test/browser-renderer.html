@@ -35,6 +35,68 @@ try {
  for(let i=0;i<a.length;i+=4){if(a[i+3]>200){count++;max=Math.max(max,a[i]);}}
  check(count>2000,'Visible framing ignores oversized authored extents');
  check(max>190&&max<250,'Bright SD lighting is applied to normally shaded layers');
+ const fitted=await renderModelThumbnail(parseMDL(source),{...options,zoom:1});const fittedPixels=await rgba(fitted);
+ let fittedCount=0;for(let i=3;i<fittedPixels.length;i+=4)if(fittedPixels[i]>200)fittedCount++;
+ check(count>fittedCount*1.15,'Default thumbnail zoom shows more detail than the uncropped zoom=1 fit');
+ const highZoomProjections=[];const originalZoomRender=ModelRenderer.prototype.renderAsync;
+ ModelRenderer.prototype.renderAsync=function(view,projection,...args){highZoomProjections.push(projection[0]);return originalZoomRender.call(this,view,projection,...args);};
+ try{await renderModelThumbnail(parseMDL(source),{...options,zoom:4});}finally{ModelRenderer.prototype.renderAsync=originalZoomRender;}
+ check(highZoomProjections.every(value=>Math.abs(value-highZoomProjections[0])<1e-5),
+  'A subject filling the viewport does not compound the requested high zoom');
+ const transparentPixels=new Uint8ClampedArray(64*64*4);
+ for(let y=27;y<37;y++)for(let x=27;x<37;x++)transparentPixels.set([255,255,255,255],(y*64+x)*4);
+ const cropped=await renderModelThumbnail(parseMDL(source),{...options,width:128,height:128,
+  loadTexture:async()=>({type:'imageData',imageData:[new ImageData(transparentPixels,64,64)]})});
+ const cropPixels=await rgba(cropped);let cropCount=0;
+ for(let i=3;i<cropPixels.length;i+=4)if(cropPixels[i]>128)cropCount++;
+ check(cropCount>5000,'Transparent texture margins are framed using rendered pixels');
+ transparentPixels.fill(0);
+ for(let y=4;y<14;y++)for(let x=27;x<37;x++)transparentPixels.set([255,255,255,255],(y*64+x)*4);
+ const offsetCrop=await renderModelThumbnail(parseMDL(source),{...options,width:128,height:128,
+  loadTexture:async()=>({type:'imageData',imageData:[new ImageData(transparentPixels,64,64)]})});
+ const offsetPixels=await rgba(offsetCrop);let offsetCount=0;
+ for(let i=3;i<offsetPixels.length;i+=4)if(offsetPixels[i]>128)offsetCount++;
+ check(offsetCount>5000,'Reduced-resolution visibility recenters off-center texture subjects vertically');
+ const additiveModel=parseMDL(source);additiveModel.Materials[0].Layers[0].FilterMode=3;
+ const additiveCanvas=document.createElement('canvas');const additiveGL=additiveCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
+ await renderModelThumbnail(additiveModel,{...options,width:128,height:128,supersampling:1,canvas:additiveCanvas,
+  loadTexture:async()=>({type:'imageData',imageData:[new ImageData(transparentPixels,64,64)]})});
+ const additivePixels=new Uint8Array(128*128*4);additiveGL.readPixels(0,0,128,128,additiveGL.RGBA,additiveGL.UNSIGNED_BYTE,additivePixels);
+ let additiveCount=0;for(let i=0;i<additivePixels.length;i+=4)if(Math.max(additivePixels[i],additivePixels[i+1],additivePixels[i+2])>128)additiveCount++;
+ check(additiveCount>5000,'Visibility framing preserves additive RGB with zero destination alpha');
+ const additivePNG=await rgba({blob:await new Promise(resolve=>additiveCanvas.toBlob(resolve)),width:128,height:128});
+ check(additivePNG.some((value,index)=>index%4===3&&value>128),'Transparent additive captures retain alpha when encoded as PNG');
+ const opaqueBlackPixels=new Uint8ClampedArray(64*64*4);for(let i=3;i<opaqueBlackPixels.length;i+=4)opaqueBlackPixels[i]=255;
+ for(let y=27;y<37;y++)for(let x=27;x<37;x++)opaqueBlackPixels.set([128,64,32,255],(y*64+x)*4);
+ const blackSprite=async()=>({type:'imageData',imageData:[new ImageData(opaqueBlackPixels,64,64)]});
+ const opaqueBlackCount=pixels=>{let count=0;for(let i=0;i<pixels.length;i+=4)if(pixels[i+3]>32&&Math.max(pixels[i],pixels[i+1],pixels[i+2])<=12)count++;return count;};
+ additiveModel.Materials[0].Layers[0].FilterMode=4;
+ const colorKeyPNG=await renderModelThumbnail(additiveModel,{...options,loadTexture:blackSprite});
+ check(opaqueBlackCount(await rgba(colorKeyPNG))===0,'Opaque black texels in additive meshes remain transparent in PNG');
+ const blendCanvas=document.createElement('canvas');blendCanvas.width=128;blendCanvas.height=128;
+ const blendGL=blendCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
+ const blendRenderer=new ModelRenderer(additiveModel);blendRenderer.setEnvironmentMapProcessingEnabled(false);blendRenderer.initGL(blendGL);
+ await blendRenderer.loadTextures(blackSprite);blendRenderer.setPose(0,1);
+ const blendCamera=fitThumbnailCamera(blendRenderer.getVisibleBounds(),128,128,[0,0,1]);blendRenderer.setCamera(blendCamera.position,blendCamera.rotation);
+ blendGL.viewport(0,0,128,128);blendGL.clearColor(0,0,0,0);blendGL.clear(blendGL.COLOR_BUFFER_BIT|blendGL.DEPTH_BUFFER_BIT);
+ await blendRenderer.renderAsync(blendCamera.view,blendCamera.projection);const originalRGB=new Uint8Array(4);blendGL.readPixels(64,64,1,1,blendGL.RGBA,blendGL.UNSIGNED_BYTE,originalRGB);
+ blendRenderer.setCaptureAlphaEnabled(true);blendGL.depthMask(true);blendGL.clear(blendGL.COLOR_BUFFER_BIT|blendGL.DEPTH_BUFFER_BIT);
+ await blendRenderer.renderAsync(blendCamera.view,blendCamera.projection);const captureRGB=new Uint8Array(4);blendGL.readPixels(64,64,1,1,blendGL.RGBA,blendGL.UNSIGNED_BYTE,captureRGB);
+ check(originalRGB[0]>20&&originalRGB[3]===0&&captureRGB[3]>0&&[0,1,2].every(i=>Math.abs(originalRGB[i]-captureRGB[i])<=1),
+  'Additive capture coverage changes alpha while preserving framebuffer RGB');
+ blendRenderer.destroy();ModelRenderer.releaseSharedResources(blendGL);blendGL.getExtension('WEBGL_lose_context')?.loseContext();
+ additiveGL.getExtension('WEBGL_lose_context')?.loseContext();
+ const readbackCanvas=document.createElement('canvas');
+ const readbackGL=readbackCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
+ const readPixels=readbackGL.readPixels.bind(readbackGL);let maximumReadback=0,measuredPixels=0;
+ readbackGL.readPixels=(...args)=>{maximumReadback=Math.max(maximumReadback,args[6].byteLength);measuredPixels+=args[2]*args[3];return readPixels(...args);};
+ const largeCapture=await renderModelThumbnail(parseMDL(source),{...options,width:512,height:512,canvas:readbackCanvas});
+ check(maximumReadback>0&&maximumReadback<=1024*1024,'Large captures bound CPU visibility readback to one MiB');
+ check(measuredPixels>0&&measuredPixels<=2*512*512,'Large captures scan at most two 512-square visibility images');
+ const largePixels=await rgba(largeCapture);let largeCount=0;
+ for(let i=3;i<largePixels.length;i+=4)if(largePixels[i]>128)largeCount++;
+ check(largeCount>70000,'Large captures redraw the fitted subject at full output resolution');
+ readbackGL.getExtension('WEBGL_lose_context')?.loseContext();
  model.Materials[0].Layers[0].Shading|=1;
  const unshaded=await renderModelThumbnail(model,options);const b=await rgba(unshaded);
  check(Math.max(...b.filter((v,i)=>i%4===0))===255,'Unshaded bypasses lighting');
@@ -117,6 +179,11 @@ try {
   HeightAbove:0.5,HeightBelow:0.5,Color:new Float32Array([0,1,0]),Alpha:1,LifeSpan:2,
   EmissionRate:30,Rows:1,Columns:1,TextureSlot:0,MaterialID:0,Gravity:0};
  ribbonModel.Nodes.push(ribbon);ribbonModel.RibbonEmitters=[ribbon];
+ const automaticRibbon=await renderModelThumbnail(ribbonModel,options);
+ check((await rgba(automaticRibbon)).some((value,index)=>index%4===3&&value>100),
+  'Ribbons get a visible thumbnail without explicit warmup');
+ let disabledWarmupRejected=false;try{await renderModelThumbnail(ribbonModel,{...options,warmupMs:0,findVisibleFrame:false});}catch{disabledWarmupRejected=true;}
+ check(disabledWarmupRejected,'Exact first-frame capture can opt out of automatic effect simulation');
  const ribbonImage=await renderModelThumbnail(ribbonModel,{...options,warmupMs:500});
  const ribbonPixels=await rgba(ribbonImage);
  check(ribbonPixels.some((value,index)=>index%4===3&&value>100),'Warmed ribbons retain their GL buffers and render visible pixels');
@@ -135,6 +202,44 @@ try {
   LifeSpanUVAnim:new Uint32Array([0,0,1]),DecayUVAnim:new Uint32Array([0,0,1]),
   TailUVAnim:new Uint32Array([0,0,1]),TailDecayUVAnim:new Uint32Array([0,0,1])};
  particleModel.Nodes.push(particle);particleModel.ParticleEmitters2=[particle];
+ const updatePrototype=ModelRenderer.prototype.update,automaticStart=performance.now();let simulationSteps=0;
+ ModelRenderer.prototype.update=function(delta){if(delta>1)simulationSteps++;return updatePrototype.call(this,delta);};
+ let automaticParticle;try{automaticParticle=await renderModelThumbnail(particleModel,options);}finally{ModelRenderer.prototype.update=updatePrototype;}
+ check((await rgba(automaticParticle)).some((value,index)=>index%4===3&&value>100),
+  'Particles get a visible thumbnail without explicit warmup');
+ check(simulationSteps<=31,'Default effect warmup uses at most 30 small simulation updates');
+ report.push('Automatic particle capture: '+Math.round(performance.now()-automaticStart)+'ms wall time');
+ particle.Visibility={Frames:new Uint32Array([0,400,401,1000]),Values:new Float32Array([0,0,1,1]),VectorSize:1,LineType:0,GlobalSeqId:null};
+ const delayedParticle=await renderModelThumbnail(particleModel,options);
+ check(delayedParticle.frame>500&&(await rgba(delayedParticle)).some((value,index)=>index%4===3&&value>100),
+  'One short retry captures effects enabled later in the animation');
+ particle.Visibility=1;particle.FilterMode=1;
+ const additiveParticle=await renderModelThumbnail(particleModel,options);
+ check((await rgba(additiveParticle)).some((value,index)=>index%4===1&&value>100),
+  'Additive particle thumbnails survive transparent PNG encoding');
+ const blackParticle=await renderModelThumbnail(particleModel,{...options,loadTexture:blackSprite});
+ check(opaqueBlackCount(await rgba(blackParticle))===0,'Opaque black texels in additive particles remain transparent in PNG');
+ ribbonModel.Materials[0].Layers[0].FilterMode=4;
+ const blackRibbon=await renderModelThumbnail(ribbonModel,{...options,loadTexture:blackSprite});
+ check(opaqueBlackCount(await rgba(blackRibbon))===0,'Opaque black texels in additive ribbons remain transparent in PNG');
+ particle.Squirt=true;particle.LifeSpan=0.4;particle.EmissionRate={Frames:new Uint32Array([0,33,233]),
+  Values:new Float32Array([0,20,0]),VectorSize:1,LineType:0,GlobalSeqId:null};
+ particleModel.Sequences[0].Interval[1]=3400;
+ const shortBurst=await renderModelThumbnail(particleModel,options);
+ check(shortBurst.frame<400&&(await rgba(shortBurst)).some((value,index)=>index%4===3&&value>100),
+  'Short squirt effects are captured after emission before their particles expire');
+ particle.Squirt=false;particle.LifeSpan=2;particle.EmissionRate=30;particleModel.Sequences[0].Interval[1]=1000;
+ const lateMesh=parseMDL(source);lateMesh.Sequences[0].Interval[1]=10000;
+ lateMesh.GeosetAnims=lateMesh.Geosets.map((_,GeosetId)=>({GeosetId,Flags:0,Color:new Float32Array([1,1,1]),
+  Alpha:{Frames:new Uint32Array([0,3000]),Values:new Float32Array([0,1]),VectorSize:1,LineType:0,GlobalSeqId:null}}));
+ const hiddenEmitter={...particle,Visibility:0};lateMesh.Nodes.push(hiddenEmitter);lateMesh.ParticleEmitters2=[hiddenEmitter];
+ const lateCapture=await renderModelThumbnail(lateMesh,options);
+ check(lateCapture.frame>=3000&&(await rgba(lateCapture)).some((value,index)=>index%4===3&&value>100),
+  'Hidden effect declarations do not suppress late visible mesh frame search');
+ lateMesh.GeosetAnims[0].Alpha.Frames=new Uint32Array([0,10]);lateMesh.GeosetAnims[0].Alpha.Values=new Float32Array([1,0]);
+ const initialCapture=await renderModelThumbnail(lateMesh,options);
+ check(initialCapture.frame===1&&(await rgba(initialCapture)).some((value,index)=>index%4===3&&value>100),
+  'Empty hidden effects preserve a mesh visible only at the requested initial pose');
  const fallbackParticle=await renderModelThumbnail(particleModel,{...options,warmupMs:500,allowMissingTextures:true,
   loadTexture:async()=>{throw new Error('Unavailable effect texture');}});
  const particlePixels=await rgba(fallbackParticle);

@@ -6,6 +6,7 @@ uniform sampler2D uSampler;
 uniform vec3 uReplaceableColor;
 uniform float uReplaceableType;
 uniform float uDiscardAlphaLevel;
+uniform float uCaptureAlpha;
 uniform vec4 uColor;
 uniform mat3 uTVertexAnim;
 
@@ -35,5 +36,10 @@ void main(void) {
 
     if (gl_FragColor[3] < uDiscardAlphaLevel) {
         discard;
+    }
+    if (uCaptureAlpha > 0.5) {
+        float coverage = clamp(max(gl_FragColor.r, max(gl_FragColor.g, gl_FragColor.b)), 0., 1.);
+        if (coverage > 0.) gl_FragColor.rgb /= coverage;
+        gl_FragColor.a *= coverage;
     }
 }

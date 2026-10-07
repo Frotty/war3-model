@@ -791,16 +791,19 @@ function generateBones (model: Model, stream: Stream): void {
 }
 
 
-function byteLengthLight (light: Light): number {
+function byteLengthLight (light: Light, version: number): number {
     return 4 /* size */ +
         byteLengthNode(light) +
         4 /* LightType */ +
+        (version >= 1600 ? 4 /* ReforgedFlags */ : 0) +
         4 /* AttenuationStart */ +
         4 /* AttenuationEnd */ +
         4 * 3 /* static Color */ +
         4 /* static Intensity */ +
         4 * 3 /* static AmbColor */ +
         4 /* static AmbIntensity */ +
+        (version >= 1200 ? 4 /* ShadowIntensity */ : 0) +
+        (version >= 1600 ? 20 /* ReforgedData */ : 0) +
         (typeof light.Visibility === 'number' ? 4 /* static Visibility */ : 0) +
         (light.Visibility && typeof light.Visibility !== 'number' ?
             4 /* keyword */ + byteLengthAnimVector(light.Visibility, AnimVectorType.FLOAT1) :
@@ -839,7 +842,7 @@ function byteLengthLights (model: Model): number {
 
     return 4 /* keyword */ +
         4 /* size */ +
-        sum(model.Lights.map(byteLengthLight));
+        sum(model.Lights.map(light => byteLengthLight(light, model.Version)));
 }
 
 function generateLights (model: Model, stream: Stream): void {
@@ -851,9 +854,10 @@ function generateLights (model: Model, stream: Stream): void {
     stream.int32(byteLengthLights(model) - 8);
 
     for (const light of model.Lights) {
-        stream.int32(byteLengthLight(light));
+        stream.int32(byteLengthLight(light, model.Version));
         generateNode(light, stream);
         stream.int32(light.LightType);
+        if (model.Version >= 1600) stream.int32(light.ReforgedFlags || 0);
         stream.float32(typeof light.AttenuationStart === 'number' ? light.AttenuationStart : 0);
         stream.float32(typeof light.AttenuationEnd === 'number' ? light.AttenuationEnd : 0);
 
@@ -880,6 +884,10 @@ function generateLights (model: Model, stream: Stream): void {
         }
 
         stream.float32(typeof light.AmbIntensity === 'number' ? light.AmbIntensity : 0);
+        if (model.Version >= 1200) stream.float32(light.ShadowIntensity || 0);
+        if (model.Version >= 1600) {
+            for (let index = 0; index < 5; ++index) stream.float32(light.ReforgedData?.[index] ?? 0);
+        }
 
         if (typeof light.Visibility === 'number') {
             stream.float32(light.Visibility);
@@ -907,11 +915,11 @@ function generateLights (model: Model, stream: Stream): void {
         }
         if (light.AttenuationStart && typeof light.AttenuationStart !== 'number') {
             stream.keyword('KLAS');
-            stream.animVector(light.AttenuationStart, AnimVectorType.INT1);
+            stream.animVector(light.AttenuationStart, AnimVectorType.FLOAT1);
         }
         if (light.AttenuationEnd && typeof light.AttenuationEnd !== 'number') {
             stream.keyword('KLAE');
-            stream.animVector(light.AttenuationEnd, AnimVectorType.INT1);
+            stream.animVector(light.AttenuationEnd, AnimVectorType.FLOAT1);
         }
     }
 }
@@ -1398,7 +1406,8 @@ function byteLengthCamera (camera: Camera): number {
             4 /* keyword */ + byteLengthAnimVector(camera.TargetTranslation, AnimVectorType.FLOAT3) :
             0
         ) +
-        (camera.Rotation ? 4 /* keyword */ + byteLengthAnimVector(camera.Rotation, AnimVectorType.FLOAT1) : 0);
+        (camera.Rotation ? 4 /* keyword */ + byteLengthAnimVector(camera.Rotation, AnimVectorType.FLOAT1) : 0) +
+        sum(Object.values(camera.AdditionalTracks || {}).map(track => 4 + byteLengthAnimVector(track, AnimVectorType.FLOAT1)));
 }
 
 function byteLengthCameras (model: Model): number {
@@ -1420,7 +1429,9 @@ function generateCameras (model: Model, stream: Stream): void {
     stream.int32(byteLengthCameras(model) - 8);
 
     for (const camera of model.Cameras) {
-        stream.int32(byteLengthCamera(camera));
+        const size = byteLengthCamera(camera);
+        if (camera.Flags !== undefined && size >= 0x1000000) throw new Error('Packed camera size exceeds 24 bits');
+        stream.uint32(camera.Flags !== undefined ? size | (camera.Flags << 24) : size);
         stream.str(camera.Name, MODEL_CAMERA_NAME_LENGTH);
         stream.float32Array(camera.Position);
         stream.float32(camera.FieldOfView);
@@ -1439,6 +1450,10 @@ function generateCameras (model: Model, stream: Stream): void {
         if (camera.TargetTranslation) {
             stream.keyword('KTTR');
             stream.animVector(camera.TargetTranslation, AnimVectorType.FLOAT3);
+        }
+        for (const [tag, track] of Object.entries(camera.AdditionalTracks || {})) {
+            stream.keyword(tag);
+            stream.animVector(track, AnimVectorType.FLOAT1);
         }
     }
 }

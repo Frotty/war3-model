@@ -10,6 +10,8 @@ export interface NodeWrapper {
 export interface RendererData {
     model: Model;
     frame: number;
+    /** WebGL image captures accumulate additive coverage so PNG alpha retains their RGB. */
+    captureAlpha?: boolean;
     animation: number;
     animationInfo: Sequence;
     globalSequencesFrames: number[];

@@ -25,10 +25,12 @@ export interface ThumbnailOptions extends WaitOptions {
     frameOffsetMs?: number;
     /** Search the chosen sequence if its initial pose contains no visible geometry. */
     findVisibleFrame?: boolean;
-    /** Simulate particles/trails before capturing; zero by default. */
+    /** Simulate particles/trails before capturing. By default effects get a short automatic warmup (<=500ms). Zero opts out. */
     warmupMs?: number;
     levelOfDetail?: number;
     padding?: number;
+    /** Detail-oriented framing multiplier; defaults to 1.2. Set 1 for an uncropped fit. */
+    zoom?: number;
     /** Direction from the model toward the camera in WC3's Z-up coordinate system. */
     cameraDirection?: vec3;
     background?: [number, number, number, number];
@@ -174,10 +176,10 @@ async function renderThumbnail (model: Model, options: ThumbnailOptions, cache?:
 }
 
 async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?: ThumbnailCache): Promise<ThumbnailResult> {
-    const {width, height, supersampling = 2, levelOfDetail = 0, warmupMs = 0} = options;
+    const {width, height, supersampling = 2, levelOfDetail = 0, warmupMs = 0, zoom = 1.2} = options;
     if (![width, height, supersampling].every(value => Number.isInteger(value) && value > 0) ||
         width * supersampling > 8192 || height * supersampling > 8192 ||
-        !Number.isFinite(warmupMs) || warmupMs < 0 || warmupMs > 10000) {
+        !Number.isFinite(warmupMs) || warmupMs < 0 || warmupMs > 10000 || !Number.isFinite(zoom) || zoom <= 0 || zoom > 4) {
         throw new Error('Invalid thumbnail size, supersampling, or warmup');
     }
     // Acquire limits on a tiny backing buffer before allocating the requested capture size.
@@ -185,7 +187,7 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
     const gl = canvas.getContext('webgl2', {alpha: true, antialias: true, preserveDrawingBuffer: true}) as WebGL2RenderingContext;
     if (!gl) throw new Error('WebGL2 is required for thumbnails');
     if (!gl.getContextAttributes()?.preserveDrawingBuffer) throw new Error('Thumbnail canvas must preserve its drawing buffer');
-    const renderer = new ModelRenderer(model);
+        const renderer = new ModelRenderer(model);
     const maxTextureSize = options.maxTextureSize ?? 512;
     const cacheKey = (path: string): string => JSON.stringify([options.textureNamespace || '', path,
         model.Textures.find(texture => texture.Image === path)?.Flags || 0, maxTextureSize]);
@@ -206,6 +208,7 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
         renderer.setEnvironmentMapProcessingEnabled(options.useEnvironmentMap ?? false);
         renderer.setEnvironmentMapNamespace(options.textureNamespace || '');
         renderer.setTextureSizeLimit(maxTextureSize);
+        renderer.setCaptureAlphaEnabled((options.background?.[3] ?? 0) === 0);
         renderer.initGL(gl);
         model.Textures.forEach(texture => {
             const key = cacheKey(texture.Image);
@@ -226,20 +229,56 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
         let offset = options.frameOffsetMs ?? 1;
         renderer.setPose(sequence, offset);
         const interval = model.Sequences[sequence]?.Interval || [0, 0];
+        const duration = interval[1] - interval[0];
+        const automaticEffects = options.warmupMs === undefined && options.findVisibleFrame !== false &&
+            (model.ParticleEmitters2.length > 0 || model.RibbonEmitters.length > 0);
+        let effectWarmup = automaticEffects ? Math.min(500, Math.max(100, duration * 0.25)) : warmupMs;
+        if (automaticEffects) {
+            // A brief squirt can already be dead at 25% of a long Birth animation.
+            // Capture shortly after its first nonzero emission key instead.
+            for (const emitter of model.ParticleEmitters2) {
+                const emission = emitter.EmissionRate;
+                if (!emitter.Squirt || typeof emission === 'number' || !emission) continue;
+                const start = emission.GlobalSeqId !== null && emission.GlobalSeqId !== undefined ? 0 : interval[0];
+                const key = emission.Frames.findIndex((frame, index) => frame >= start + offset &&
+                    frame <= start + duration && emission.Values[index] > 0);
+                if (key < 0) continue;
+                const afterBurst = Math.max(16, Math.min(100, emitter.LifeSpan * 250));
+                effectWarmup = Math.min(effectWarmup, emission.Frames[key] - start - offset + afterBurst);
+            }
+        }
         let bounds = renderer.getVisibleBounds({levelOfDetail});
-        if (!bounds && !warmupMs && options.findVisibleFrame !== false) {
+        if (!bounds && !effectWarmup && options.findVisibleFrame !== false) {
             for (let step = 1; step <= 16 && !bounds; ++step) {
                 offset = (interval[1] - interval[0]) * step / 16;
                 renderer.setPose(sequence, offset);
                 bounds = renderer.getVisibleBounds({levelOfDetail});
             }
         }
-        for (let remaining = warmupMs; remaining > 0;) {
-            const delta = Math.min(remaining, 1000 / 60);
-            renderer.update(delta);
-            remaining -= delta;
-        }
+        const simulate = (milliseconds: number): void => {
+            for (let remaining = milliseconds; remaining > 0;) {
+                if (options.signal?.aborted) throw abortError();
+                const delta = Math.min(remaining, 1000 / 60);
+                renderer.update(delta);
+                remaining -= delta;
+            }
+        };
+        simulate(effectWarmup);
         bounds = renderer.getVisibleBounds({levelOfDetail});
+        // One bounded retry catches emitters enabled later in the chosen animation.
+        if (!bounds && automaticEffects) {
+            renderer.setPose(sequence, Math.min(duration * 0.5, 1000));
+            simulate(250);
+            bounds = renderer.getVisibleBounds({levelOfDetail});
+        }
+        // Hidden/irrelevant emitters must not suppress the mesh's ordinary pose search.
+        // This adds no effect simulation and only runs after the short effect budget fails.
+        if (!bounds && automaticEffects && model.Geosets.length > 0) {
+            for (let step = 0; step <= 16 && !bounds; ++step) {
+                renderer.setPose(sequence, step === 0 ? offset : duration * step / 16);
+                bounds = renderer.getVisibleBounds({levelOfDetail, includeEffects: false});
+            }
+        }
         if (!bounds) throw new Error('The selected pose has no visible geometry; try warmupMs for particle-only models');
         // Billboards change bounds when the camera changes. Refit their evaluated pose as well.
         let camera = fitThumbnailCamera(bounds, width, height, options.cameraDirection, options.padding);
@@ -250,12 +289,54 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
             camera = fitThumbnailCamera(bounds, width, height, options.cameraDirection, options.padding);
         }
         renderer.setCamera(camera.position, camera.rotation);
+        for (const index of [0, 1, 4, 5, 8, 9, 12, 13]) camera.projection[index] *= zoom;
         const background = options.background || [0, 0, 0, 0];
-        gl.viewport(0, 0, canvas.width, canvas.height);
+        // Measure a small render directly in GL so additive RGB survives zero alpha.
+        // CPU readback and scanning stay bounded independently of the capture resolution.
+        const measureVisibility = background.every(channel => channel === 0);
+        const scale = measureVisibility ? Math.min(1, 512 / Math.max(canvas.width, canvas.height)) : 1;
+        const measureWidth = Math.max(1, Math.round(canvas.width * scale));
+        const measureHeight = Math.max(1, Math.round(canvas.height * scale));
+        gl.viewport(0, 0, measureWidth, measureHeight);
         gl.clearColor(background[0], background[1], background[2], background[3]);
         gl.depthMask(true);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         await renderer.renderAsync(camera.view, camera.projection, {...options, levelOfDetail});
+        // Transparent texture regions can make geometric bounds much larger than the visible
+        // subject (notably portraits). Reframe on the GPU rather than enlarging a blurry crop.
+        if (measureVisibility) {
+            const pixels = new Uint8Array(measureWidth * measureHeight * 4);
+            for (let attempt = 0; attempt < 2; ++attempt) {
+                gl.readPixels(0, 0, measureWidth, measureHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+                let minX = measureWidth, minY = measureHeight, maxX = -1, maxY = -1, count = 0;
+                for (let offset = 0; offset < pixels.length; offset += 4) {
+                    if (Math.max(pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3]) <= 12) continue;
+                    const pixel = offset / 4, x = pixel % measureWidth, y = Math.floor(pixel / measureWidth);
+                    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+                    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+                    count++;
+                }
+                const span = Math.max((maxX - minX + 1) / measureWidth, (maxY - minY + 1) / measureHeight);
+                const target = Math.min(1, (1 - 2 * (options.padding ?? 0.08)) * zoom);
+                if (count < 4 || span >= target * 0.95) break;
+                const refitZoom = Math.min(16, target / span);
+                const centerX = (minX + maxX + 1) / measureWidth - 1;
+                const centerY = (minY + maxY + 1) / measureHeight - 1;
+                for (const index of [0, 4, 8]) camera.projection[index] *= refitZoom;
+                for (const index of [1, 5, 9]) camera.projection[index] *= refitZoom;
+                camera.projection[12] = (camera.projection[12] - centerX) * refitZoom;
+                camera.projection[13] = (camera.projection[13] - centerY) * refitZoom;
+                gl.depthMask(true);
+                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                await renderer.renderAsync(camera.view, camera.projection, {...options, levelOfDetail});
+            }
+        }
+        if (scale < 1) {
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.depthMask(true);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            await renderer.renderAsync(camera.view, camera.projection, {...options, levelOfDetail});
+        }
         // Copy to a separate canvas before encoding; a reusable GL canvas may render another model later.
         const output = newCanvas(width, height);
         const context = output.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;

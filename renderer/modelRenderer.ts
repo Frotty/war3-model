@@ -355,6 +355,7 @@ export class ModelRenderer {
         modelLightColorsUniform: WebGLUniformLocation | null;
         modelLightAttenuationUniform: WebGLUniformLocation | null;
         discardAlphaLevelUniform: WebGLUniformLocation | null;
+        captureAlphaUniform: WebGLUniformLocation | null;
         tVertexAnimUniform: WebGLUniformLocation | null;
         useReplaceableMaskUniform: WebGLUniformLocation | null;
         wireframeUniform: WebGLUniformLocation | null;
@@ -530,6 +531,7 @@ export class ModelRenderer {
             modelLightColorsUniform: null,
             modelLightAttenuationUniform: null,
             discardAlphaLevelUniform: null,
+            captureAlphaUniform: null,
             tVertexAnimUniform: null,
             useReplaceableMaskUniform: null,
             wireframeUniform: null,
@@ -1488,6 +1490,12 @@ export class ModelRenderer {
 
     public setEnvironmentMapProcessingEnabled (enabled: boolean): void {
         this.environmentMapProcessingEnabled = enabled;
+    }
+
+    /** Accumulate additive coverage for transparent WebGL image captures. RGB blending is unchanged. */
+    public setCaptureAlphaEnabled (enabled: boolean): void {
+        this.rendererData.captureAlpha = enabled;
+        this.stateBlendFilterMode = null;
     }
 
     public setSequence (index: number): void {
@@ -3452,6 +3460,7 @@ export class ModelRenderer {
         this.shaderProgramLocations.modelLightColorsUniform = this.gl.getUniformLocation(shaderProgram, 'uModelLightColors[0]');
         this.shaderProgramLocations.modelLightAttenuationUniform = this.gl.getUniformLocation(shaderProgram, 'uModelLightAttenuation[0]');
         this.shaderProgramLocations.discardAlphaLevelUniform = this.gl.getUniformLocation(shaderProgram, 'uDiscardAlphaLevel');
+        this.shaderProgramLocations.captureAlphaUniform = this.gl.getUniformLocation(shaderProgram, 'uCaptureAlpha');
         this.shaderProgramLocations.tVertexAnimUniform = this.gl.getUniformLocation(shaderProgram, 'uTVertexAnim');
         this.shaderProgramLocations.useReplaceableMaskUniform = this.gl.getUniformLocation(shaderProgram, 'uUseReplaceableMask');
         this.shaderProgramLocations.wireframeUniform = this.gl.getUniformLocation(shaderProgram, 'uWireframe');
@@ -4892,6 +4901,8 @@ export class ModelRenderer {
         // matched no branch at all in that case and silently inherited the previous layer's blend
         // and depth state.
         const filterMode = layer.FilterMode || FilterMode.None;
+        this.gl.uniform1f(this.shaderProgramLocations.captureAlphaUniform, this.rendererData.captureAlpha &&
+            (filterMode === FilterMode.Additive || filterMode === FilterMode.AddAlpha) ? 1 : 0);
 
         if (filterMode === FilterMode.None) {
             this.setBlend(false);
@@ -4906,7 +4917,9 @@ export class ModelRenderer {
                 if (filterMode === FilterMode.Transparent || filterMode === FilterMode.Blend) {
                     this.gl.blendFuncSeparate(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA, this.gl.ONE, this.gl.ONE_MINUS_SRC_ALPHA);
                 } else if (filterMode === FilterMode.Additive || filterMode === FilterMode.AddAlpha) {
-                    this.gl.blendFuncSeparate(this.gl.SRC_ALPHA, this.gl.ONE, this.gl.ZERO, this.gl.ONE);
+                    this.gl.blendFuncSeparate(this.gl.SRC_ALPHA, this.gl.ONE,
+                        this.rendererData.captureAlpha ? this.gl.ONE : this.gl.ZERO,
+                        this.rendererData.captureAlpha ? this.gl.ONE_MINUS_SRC_ALPHA : this.gl.ONE);
                 } else if (filterMode === FilterMode.Modulate) {
                     this.gl.blendFuncSeparate(this.gl.ZERO, this.gl.SRC_COLOR, this.gl.ZERO, this.gl.ONE);
                 } else if (filterMode === FilterMode.Modulate2x) {

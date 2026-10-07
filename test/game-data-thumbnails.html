@@ -1,0 +1,69 @@
+<!doctype html><meta charset="utf-8"><title>Game-data thumbnail stress test</title>
+<script type="module">
+import {parseMDX, parseMDL, ThumbnailSession} from '/index.ts';
+import {parseHeaders as parseDDS} from 'dds-parser';
+const session = new ThumbnailSession({maxCachedTextureBytes: 32 * 1024 * 1024});
+window.captureGameModel = async ({path, size, minCoverage, minSpan}) => {
+    const bytes = await (await fetch('/game-assets/model')).arrayBuffer();
+    const model = /\.mdl$/i.test(path) ? parseMDL(new TextDecoder().decode(bytes)) : parseMDX(bytes);
+    const textureNamespace = path.slice(0, path.lastIndexOf(':'));
+    const loadTexture = async texture => {
+        const response = await fetch('/game-assets/texture?path=' + encodeURIComponent(texture.Image));
+        if (!response.ok) throw new Error(`Texture unavailable: ${texture.Image}`);
+        if (response.headers.get('X-Texture-Raster')) {
+            const image = await response.json();
+            const rgba = Uint8ClampedArray.from(atob(image.rgbaBase64), value => value.charCodeAt(0));
+            return {type: 'imageData', imageData: [new ImageData(rgba, image.width, image.height)]};
+        }
+        const bytes = await response.arrayBuffer();
+        if (/\.blp$/i.test(response.headers.get('X-Texture-Path'))) return {type: 'blp', buffer: bytes};
+        if (/\.dds$/i.test(response.headers.get('X-Texture-Path'))) {
+            const info = parseDDS(bytes);
+            const formats = {dxt1: 0x83F0, dxt3: 0x83F2, dxt5: 0x83F3, ati1: 0x8DBB, ati2: 0x8DBD};
+            const format = formats[info.format];
+            if (!format) throw new Error(`Unsupported DDS format: ${info.format}`);
+            return {type: 'dds', buffer: bytes, info, format};
+        }
+        throw new Error('Unsupported texture encoding');
+    };
+    const stand = model.Sequences.findIndex(sequence => /^stand(?:\s|$)/i.test(sequence.Name));
+    const sequences = [...new Set([Math.max(0, stand), ...model.Sequences.map((_, index) => index)])];
+    let best;
+    let lastError;
+    capture: for (const sequence of sequences) {
+        const interval = model.Sequences[sequence]?.Interval || [0, 0];
+        for (const offset of new Set([1, (interval[1] - interval[0]) * 0.2, (interval[1] - interval[0]) * 0.5])) {
+            try {
+                const result = await session.render(model, {width: size, height: size, sequence, frameOffsetMs: offset,
+                    textureNamespace, maxTextureSize: 256, loadTexture, allowMissingTextures: true});
+                const image = await createImageBitmap(result.blob);
+                const canvas = new OffscreenCanvas(size, size);
+                const context = canvas.getContext('2d');
+                context.drawImage(image, 0, 0); image.close();
+                const rgba = context.getImageData(0, 0, size, size).data;
+                let occupied = 0, minX = size, minY = size, maxX = -1, maxY = -1;
+                for (let index = 0; index < rgba.length; index += 4) {
+                    if (Math.max(rgba[index], rgba[index + 1], rgba[index + 2], rgba[index + 3]) <= 12) continue;
+                    const pixel = index / 4, x = pixel % size, y = Math.floor(pixel / size);
+                    occupied++; minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+                }
+                const coverage = occupied / (size * size);
+                const span = Math.max(maxX - minX + 1, maxY - minY + 1) / size;
+                const pngBytes = new Uint8Array(await result.blob.arrayBuffer());
+                let binary = '';
+                for (let at = 0; at < pngBytes.length; at += 8192) binary += String.fromCharCode(...pngBytes.subarray(at, at + 8192));
+                const png = btoa(binary);
+                const candidate = {coverage, span, png, sequence, frame: result.frame,
+                    missingTexturePaths: result.missingTextures, bounds: result.bounds,
+                    pass: coverage >= minCoverage && span >= minSpan};
+                if (!best || coverage > best.coverage) best = candidate;
+                if (candidate.pass) { best = candidate; break capture; }
+            } catch (error) { lastError = error.message; }
+        }
+    }
+    return {...(best || {pass: false, error: lastError || 'No visible pose'}),
+        structure: {geosets: model.Geosets.length, particles: model.ParticleEmitters.length,
+            particles2: model.ParticleEmitters2.length, ribbons: model.RibbonEmitters.length,
+            cameras: model.Cameras.length, sequences: model.Sequences.length}};
+};
+</script>

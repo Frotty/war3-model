@@ -423,6 +423,10 @@ export interface ParticleEmitter2 extends Node {
 }
 
 export interface Camera {
+    /** Upper byte of the packed Reforged camera size. */
+    Flags?: number;
+    /** Scalar lens tracks found in v1800; retain their binary tags until their semantics are documented. */
+    AdditionalTracks?: Partial<Record<'IDUF' | 'ELAF' | 'PTSF', AnimVector>>;
     Name: string;
     Position: Float32Array;
     FieldOfView: number;
@@ -442,6 +446,12 @@ export enum LightType {
 
 export interface Light extends Node {
     LightType: LightType;
+    /** Extra v1600+ header word; its flag meanings are not yet documented. */
+    ReforgedFlags?: number;
+    /** Added in v1200, independently of animation visibility. */
+    ShadowIntensity?: number;
+    /** Five additional static floats in v1600+, preserved for MDX round trips. */
+    ReforgedData?: Float32Array;
 
     AttenuationStart?: AnimVector|number;
     AttenuationEnd?: AnimVector|number;

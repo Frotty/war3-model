@@ -833,7 +833,7 @@ function parseCameras (model: Model, state: State, size: number): void {
 
     while (state.pos < camerasEnd) {
         const cameraStart = state.pos;
-        const encodedCameraSize = state.int32();
+        const encodedCameraSize = state.int32() >>> 0;
         let cameraSize = encodedCameraSize;
 
         // Reforged stores camera flags in the upper byte of this length field. Older models use
@@ -850,6 +850,7 @@ function parseCameras (model: Model, state: State, size: number): void {
         }
 
         const camera: Camera = {} as Camera;
+        if (cameraSize !== encodedCameraSize) camera.Flags = encodedCameraSize >>> 24;
 
         camera.Name = state.str(MODEL_CAMERA_NAME_LENGTH);
 
@@ -877,6 +878,9 @@ function parseCameras (model: Model, state: State, size: number): void {
                 camera.TargetTranslation = state.animVector(AnimVectorType.FLOAT3);
             } else if (keyword === 'KCRL') {
                 camera.Rotation = state.animVector(AnimVectorType.FLOAT1);
+            } else if (keyword === 'IDUF' || keyword === 'ELAF' || keyword === 'PTSF') {
+                camera.AdditionalTracks ||= {};
+                camera.AdditionalTracks[keyword] = state.animVector(AnimVectorType.FLOAT1);
             } else {
                 throw new Error('Incorrect camera chunk data ' + keyword);
             }
@@ -902,6 +906,7 @@ function parseLights (model: Model, state: State, size: number): void {
         parseNode(model, light, state);
 
         light.LightType = state.int32();
+        if (model.Version >= 1600) light.ReforgedFlags = state.int32();
         light.AttenuationStart = state.float32();
         light.AttenuationEnd = state.float32();
 
@@ -920,6 +925,8 @@ function parseLights (model: Model, state: State, size: number): void {
         }
 
         light.AmbIntensity = state.float32();
+        if (model.Version >= 1200) light.ShadowIntensity = state.float32();
+        if (model.Version >= 1600) light.ReforgedData = state.float32Array(5);
         light.Visibility = 1;
 
         if (state.pos + 4 <= lightStart + lightSize) {
@@ -943,9 +950,9 @@ function parseLights (model: Model, state: State, size: number): void {
             } else if (keyword === 'KLBI') {
                 light.AmbIntensity = state.animVector(AnimVectorType.FLOAT1);
             } else if (keyword === 'KLAS') {
-                light.AttenuationStart = state.animVector(AnimVectorType.INT1);
+                light.AttenuationStart = state.animVector(AnimVectorType.FLOAT1);
             } else if (keyword === 'KLAE') {
-                light.AttenuationEnd = state.animVector(AnimVectorType.INT1);
+                light.AttenuationEnd = state.animVector(AnimVectorType.FLOAT1);
             } else {
                 throw new Error('Incorrect light chunk data ' + keyword);
             }
