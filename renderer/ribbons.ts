@@ -55,6 +55,7 @@ export class RibbonsController {
         replaceableColorUniform: WebGLUniformLocation | null,
         replaceableTypeUniform: WebGLUniformLocation | null,
         discardAlphaLevelUniform: WebGLUniformLocation | null,
+        captureAlphaUniform: WebGLUniformLocation | null,
         colorUniform: WebGLUniformLocation | null,
         tVertexAnimUniform: WebGLUniformLocation | null
     };
@@ -74,6 +75,7 @@ export class RibbonsController {
             replaceableColorUniform: null,
             replaceableTypeUniform: null,
             discardAlphaLevelUniform: null,
+            captureAlphaUniform: null,
             colorUniform: null,
             tVertexAnimUniform: null
         };
@@ -560,6 +562,7 @@ export class RibbonsController {
             this.gl.getUniformLocation(shaderProgram, 'uReplaceableType');
         this.shaderProgramLocations.discardAlphaLevelUniform =
             this.gl.getUniformLocation(shaderProgram, 'uDiscardAlphaLevel');
+        this.shaderProgramLocations.captureAlphaUniform = this.gl.getUniformLocation(shaderProgram, 'uCaptureAlpha');
         this.shaderProgramLocations.colorUniform =
             this.gl.getUniformLocation(shaderProgram, 'uColor');
         this.shaderProgramLocations.tVertexAnimUniform = this.gl.getUniformLocation(shaderProgram, 'uTVertexAnim');
@@ -699,6 +702,8 @@ export class RibbonsController {
     }
 
     private setLayerProps (layer: Layer, textureID: number): void {
+        this.gl.uniform1f(this.shaderProgramLocations.captureAlphaUniform, this.rendererData.captureAlpha &&
+            (layer.FilterMode === FilterMode.Additive || layer.FilterMode === FilterMode.AddAlpha) ? 1 : 0);
         this.gl.uniformMatrix3fv(this.shaderProgramLocations.tVertexAnimUniform, false,
             textureAnimationMatrix(this.interp, this.rendererData.model, layer));
         const texture = this.rendererData.model.Textures[textureID];

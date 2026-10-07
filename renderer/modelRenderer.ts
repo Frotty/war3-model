@@ -355,6 +355,7 @@ export class ModelRenderer {
         modelLightColorsUniform: WebGLUniformLocation | null;
         modelLightAttenuationUniform: WebGLUniformLocation | null;
         discardAlphaLevelUniform: WebGLUniformLocation | null;
+        captureAlphaUniform: WebGLUniformLocation | null;
         tVertexAnimUniform: WebGLUniformLocation | null;
         useReplaceableMaskUniform: WebGLUniformLocation | null;
         wireframeUniform: WebGLUniformLocation | null;
@@ -530,6 +531,7 @@ export class ModelRenderer {
             modelLightColorsUniform: null,
             modelLightAttenuationUniform: null,
             discardAlphaLevelUniform: null,
+            captureAlphaUniform: null,
             tVertexAnimUniform: null,
             useReplaceableMaskUniform: null,
             wireframeUniform: null,
@@ -3458,6 +3460,7 @@ export class ModelRenderer {
         this.shaderProgramLocations.modelLightColorsUniform = this.gl.getUniformLocation(shaderProgram, 'uModelLightColors[0]');
         this.shaderProgramLocations.modelLightAttenuationUniform = this.gl.getUniformLocation(shaderProgram, 'uModelLightAttenuation[0]');
         this.shaderProgramLocations.discardAlphaLevelUniform = this.gl.getUniformLocation(shaderProgram, 'uDiscardAlphaLevel');
+        this.shaderProgramLocations.captureAlphaUniform = this.gl.getUniformLocation(shaderProgram, 'uCaptureAlpha');
         this.shaderProgramLocations.tVertexAnimUniform = this.gl.getUniformLocation(shaderProgram, 'uTVertexAnim');
         this.shaderProgramLocations.useReplaceableMaskUniform = this.gl.getUniformLocation(shaderProgram, 'uUseReplaceableMask');
         this.shaderProgramLocations.wireframeUniform = this.gl.getUniformLocation(shaderProgram, 'uWireframe');
@@ -4898,6 +4901,8 @@ export class ModelRenderer {
         // matched no branch at all in that case and silently inherited the previous layer's blend
         // and depth state.
         const filterMode = layer.FilterMode || FilterMode.None;
+        this.gl.uniform1f(this.shaderProgramLocations.captureAlphaUniform, this.rendererData.captureAlpha &&
+            (filterMode === FilterMode.Additive || filterMode === FilterMode.AddAlpha) ? 1 : 0);
 
         if (filterMode === FilterMode.None) {
             this.setBlend(false);

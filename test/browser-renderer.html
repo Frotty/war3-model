@@ -58,6 +58,25 @@ try {
  check(additiveCount>5000,'Visibility framing preserves additive RGB with zero destination alpha');
  const additivePNG=await rgba({blob:await new Promise(resolve=>additiveCanvas.toBlob(resolve)),width:128,height:128});
  check(additivePNG.some((value,index)=>index%4===3&&value>128),'Transparent additive captures retain alpha when encoded as PNG');
+ const opaqueBlackPixels=new Uint8ClampedArray(64*64*4);for(let i=3;i<opaqueBlackPixels.length;i+=4)opaqueBlackPixels[i]=255;
+ for(let y=27;y<37;y++)for(let x=27;x<37;x++)opaqueBlackPixels.set([128,64,32,255],(y*64+x)*4);
+ const blackSprite=async()=>({type:'imageData',imageData:[new ImageData(opaqueBlackPixels,64,64)]});
+ const opaqueBlackCount=pixels=>{let count=0;for(let i=0;i<pixels.length;i+=4)if(pixels[i+3]>32&&Math.max(pixels[i],pixels[i+1],pixels[i+2])<=12)count++;return count;};
+ additiveModel.Materials[0].Layers[0].FilterMode=4;
+ const colorKeyPNG=await renderModelThumbnail(additiveModel,{...options,loadTexture:blackSprite});
+ check(opaqueBlackCount(await rgba(colorKeyPNG))===0,'Opaque black texels in additive meshes remain transparent in PNG');
+ const blendCanvas=document.createElement('canvas');blendCanvas.width=128;blendCanvas.height=128;
+ const blendGL=blendCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
+ const blendRenderer=new ModelRenderer(additiveModel);blendRenderer.setEnvironmentMapProcessingEnabled(false);blendRenderer.initGL(blendGL);
+ await blendRenderer.loadTextures(blackSprite);blendRenderer.setPose(0,1);
+ const blendCamera=fitThumbnailCamera(blendRenderer.getVisibleBounds(),128,128,[0,0,1]);blendRenderer.setCamera(blendCamera.position,blendCamera.rotation);
+ blendGL.viewport(0,0,128,128);blendGL.clearColor(0,0,0,0);blendGL.clear(blendGL.COLOR_BUFFER_BIT|blendGL.DEPTH_BUFFER_BIT);
+ await blendRenderer.renderAsync(blendCamera.view,blendCamera.projection);const originalRGB=new Uint8Array(4);blendGL.readPixels(64,64,1,1,blendGL.RGBA,blendGL.UNSIGNED_BYTE,originalRGB);
+ blendRenderer.setCaptureAlphaEnabled(true);blendGL.depthMask(true);blendGL.clear(blendGL.COLOR_BUFFER_BIT|blendGL.DEPTH_BUFFER_BIT);
+ await blendRenderer.renderAsync(blendCamera.view,blendCamera.projection);const captureRGB=new Uint8Array(4);blendGL.readPixels(64,64,1,1,blendGL.RGBA,blendGL.UNSIGNED_BYTE,captureRGB);
+ check(originalRGB[0]>20&&originalRGB[3]===0&&captureRGB[3]>0&&[0,1,2].every(i=>Math.abs(originalRGB[i]-captureRGB[i])<=1),
+  'Additive capture coverage changes alpha while preserving framebuffer RGB');
+ blendRenderer.destroy();ModelRenderer.releaseSharedResources(blendGL);blendGL.getExtension('WEBGL_lose_context')?.loseContext();
  additiveGL.getExtension('WEBGL_lose_context')?.loseContext();
  const readbackCanvas=document.createElement('canvas');
  const readbackGL=readbackCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
@@ -190,6 +209,11 @@ try {
  const additiveParticle=await renderModelThumbnail(particleModel,options);
  check((await rgba(additiveParticle)).some((value,index)=>index%4===1&&value>100),
   'Additive particle thumbnails survive transparent PNG encoding');
+ const blackParticle=await renderModelThumbnail(particleModel,{...options,loadTexture:blackSprite});
+ check(opaqueBlackCount(await rgba(blackParticle))===0,'Opaque black texels in additive particles remain transparent in PNG');
+ ribbonModel.Materials[0].Layers[0].FilterMode=4;
+ const blackRibbon=await renderModelThumbnail(ribbonModel,{...options,loadTexture:blackSprite});
+ check(opaqueBlackCount(await rgba(blackRibbon))===0,'Opaque black texels in additive ribbons remain transparent in PNG');
  particle.Squirt=true;particle.LifeSpan=0.4;particle.EmissionRate={Frames:new Uint32Array([0,33,233]),
   Values:new Float32Array([0,20,0]),VectorSize:1,LineType:0,GlobalSeqId:null};
  particleModel.Sequences[0].Interval[1]=3400;

@@ -12,6 +12,7 @@ uniform sampler2D uNormalSampler;
 uniform sampler2D uOrmSampler;
 uniform vec3 uReplaceableColor;
 uniform float uDiscardAlphaLevel;
+uniform float uCaptureAlpha;
 uniform float uLayerAlpha;
 uniform vec4 uGeosetColor;
 uniform mat3 uTVertexAnim;
@@ -173,5 +174,10 @@ void main(void) {
     // hand-made alpha-test
     if (gl_FragColor[3] < uDiscardAlphaLevel) {
         discard;
+    }
+    if (uCaptureAlpha > 0.5) {
+        float coverage = clamp(max(gl_FragColor.r, max(gl_FragColor.g, gl_FragColor.b)), 0., 1.);
+        if (coverage > 0.) gl_FragColor.rgb /= coverage;
+        gl_FragColor.a *= coverage;
     }
 }
