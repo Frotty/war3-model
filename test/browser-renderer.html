@@ -56,6 +56,8 @@ try {
  const additivePixels=new Uint8Array(128*128*4);additiveGL.readPixels(0,0,128,128,additiveGL.RGBA,additiveGL.UNSIGNED_BYTE,additivePixels);
  let additiveCount=0;for(let i=0;i<additivePixels.length;i+=4)if(Math.max(additivePixels[i],additivePixels[i+1],additivePixels[i+2])>128)additiveCount++;
  check(additiveCount>5000,'Visibility framing preserves additive RGB with zero destination alpha');
+ const additivePNG=await rgba({blob:await new Promise(resolve=>additiveCanvas.toBlob(resolve)),width:128,height:128});
+ check(additivePNG.some((value,index)=>index%4===3&&value>128),'Transparent additive captures retain alpha when encoded as PNG');
  additiveGL.getExtension('WEBGL_lose_context')?.loseContext();
  const readbackCanvas=document.createElement('canvas');
  const readbackGL=readbackCanvas.getContext('webgl2',{preserveDrawingBuffer:true});
@@ -150,6 +152,11 @@ try {
   HeightAbove:0.5,HeightBelow:0.5,Color:new Float32Array([0,1,0]),Alpha:1,LifeSpan:2,
   EmissionRate:30,Rows:1,Columns:1,TextureSlot:0,MaterialID:0,Gravity:0};
  ribbonModel.Nodes.push(ribbon);ribbonModel.RibbonEmitters=[ribbon];
+ const automaticRibbon=await renderModelThumbnail(ribbonModel,options);
+ check((await rgba(automaticRibbon)).some((value,index)=>index%4===3&&value>100),
+  'Ribbons get a visible thumbnail without explicit warmup');
+ let disabledWarmupRejected=false;try{await renderModelThumbnail(ribbonModel,{...options,warmupMs:0,findVisibleFrame:false});}catch{disabledWarmupRejected=true;}
+ check(disabledWarmupRejected,'Exact first-frame capture can opt out of automatic effect simulation');
  const ribbonImage=await renderModelThumbnail(ribbonModel,{...options,warmupMs:500});
  const ribbonPixels=await rgba(ribbonImage);
  check(ribbonPixels.some((value,index)=>index%4===3&&value>100),'Warmed ribbons retain their GL buffers and render visible pixels');
@@ -168,6 +175,28 @@ try {
   LifeSpanUVAnim:new Uint32Array([0,0,1]),DecayUVAnim:new Uint32Array([0,0,1]),
   TailUVAnim:new Uint32Array([0,0,1]),TailDecayUVAnim:new Uint32Array([0,0,1])};
  particleModel.Nodes.push(particle);particleModel.ParticleEmitters2=[particle];
+ const updatePrototype=ModelRenderer.prototype.update,automaticStart=performance.now();let simulationSteps=0;
+ ModelRenderer.prototype.update=function(delta){if(delta>1)simulationSteps++;return updatePrototype.call(this,delta);};
+ let automaticParticle;try{automaticParticle=await renderModelThumbnail(particleModel,options);}finally{ModelRenderer.prototype.update=updatePrototype;}
+ check((await rgba(automaticParticle)).some((value,index)=>index%4===3&&value>100),
+  'Particles get a visible thumbnail without explicit warmup');
+ check(simulationSteps<=31,'Default effect warmup uses at most 30 small simulation updates');
+ report.push('Automatic particle capture: '+Math.round(performance.now()-automaticStart)+'ms wall time');
+ particle.Visibility={Frames:new Uint32Array([0,400,401,1000]),Values:new Float32Array([0,0,1,1]),VectorSize:1,LineType:0,GlobalSeqId:null};
+ const delayedParticle=await renderModelThumbnail(particleModel,options);
+ check(delayedParticle.frame>500&&(await rgba(delayedParticle)).some((value,index)=>index%4===3&&value>100),
+  'One short retry captures effects enabled later in the animation');
+ particle.Visibility=1;particle.FilterMode=1;
+ const additiveParticle=await renderModelThumbnail(particleModel,options);
+ check((await rgba(additiveParticle)).some((value,index)=>index%4===1&&value>100),
+  'Additive particle thumbnails survive transparent PNG encoding');
+ particle.Squirt=true;particle.LifeSpan=0.4;particle.EmissionRate={Frames:new Uint32Array([0,33,233]),
+  Values:new Float32Array([0,20,0]),VectorSize:1,LineType:0,GlobalSeqId:null};
+ particleModel.Sequences[0].Interval[1]=3400;
+ const shortBurst=await renderModelThumbnail(particleModel,options);
+ check(shortBurst.frame<400&&(await rgba(shortBurst)).some((value,index)=>index%4===3&&value>100),
+  'Short squirt effects are captured after emission before their particles expire');
+ particle.Squirt=false;particle.LifeSpan=2;particle.EmissionRate=30;particleModel.Sequences[0].Interval[1]=1000;
  const fallbackParticle=await renderModelThumbnail(particleModel,{...options,warmupMs:500,allowMissingTextures:true,
   loadTexture:async()=>{throw new Error('Unavailable effect texture');}});
  const particlePixels=await rgba(fallbackParticle);

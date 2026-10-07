@@ -21,8 +21,8 @@ including SD, HD, locale and censored variants, then extracts and attempts a rea
 WebGL2 thumbnail for every MDX/MDL file. It resolves texture extensions and parent
 archive namespaces, supporting BLP, compressed DDS and TGA textures.
 
-Each model tries Stand first, then other animations at three offsets, with 500ms
-of simulation for particles/ribbons. A shared `ThumbnailSession` keeps textures
+Each model tries Stand first, then other animations at three offsets, using the
+thumbnail helper's bounded automatic particle/ribbon warmup. A shared `ThumbnailSession` keeps textures
 warm within a 32 MiB GPU budget; compressed sources have a separate 64 MiB budget.
 Only one model renders at a time. Missing textures are reported and use renderer
 fallbacks; this is a visibility assertion, not a texture-fidelity assertion.

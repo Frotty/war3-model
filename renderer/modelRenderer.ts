@@ -1490,6 +1490,12 @@ export class ModelRenderer {
         this.environmentMapProcessingEnabled = enabled;
     }
 
+    /** Accumulate additive coverage for transparent WebGL image captures. RGB blending is unchanged. */
+    public setCaptureAlphaEnabled (enabled: boolean): void {
+        this.rendererData.captureAlpha = enabled;
+        this.stateBlendFilterMode = null;
+    }
+
     public setSequence (index: number): void {
         if (this.model.Sequences.length && !this.model.Sequences[index]) throw new Error(`Invalid sequence ${index}`);
         this.rendererData.animation = index;
@@ -4906,7 +4912,9 @@ export class ModelRenderer {
                 if (filterMode === FilterMode.Transparent || filterMode === FilterMode.Blend) {
                     this.gl.blendFuncSeparate(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA, this.gl.ONE, this.gl.ONE_MINUS_SRC_ALPHA);
                 } else if (filterMode === FilterMode.Additive || filterMode === FilterMode.AddAlpha) {
-                    this.gl.blendFuncSeparate(this.gl.SRC_ALPHA, this.gl.ONE, this.gl.ZERO, this.gl.ONE);
+                    this.gl.blendFuncSeparate(this.gl.SRC_ALPHA, this.gl.ONE,
+                        this.rendererData.captureAlpha ? this.gl.ONE : this.gl.ZERO,
+                        this.rendererData.captureAlpha ? this.gl.ONE_MINUS_SRC_ALPHA : this.gl.ONE);
                 } else if (filterMode === FilterMode.Modulate) {
                     this.gl.blendFuncSeparate(this.gl.ZERO, this.gl.SRC_COLOR, this.gl.ZERO, this.gl.ONE);
                 } else if (filterMode === FilterMode.Modulate2x) {

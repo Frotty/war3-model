@@ -25,7 +25,7 @@ export interface ThumbnailOptions extends WaitOptions {
     frameOffsetMs?: number;
     /** Search the chosen sequence if its initial pose contains no visible geometry. */
     findVisibleFrame?: boolean;
-    /** Simulate particles/trails before capturing; zero by default. */
+    /** Simulate particles/trails before capturing. By default effects get a short automatic warmup (<=500ms). Zero opts out. */
     warmupMs?: number;
     levelOfDetail?: number;
     padding?: number;
@@ -185,7 +185,7 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
     const gl = canvas.getContext('webgl2', {alpha: true, antialias: true, preserveDrawingBuffer: true}) as WebGL2RenderingContext;
     if (!gl) throw new Error('WebGL2 is required for thumbnails');
     if (!gl.getContextAttributes()?.preserveDrawingBuffer) throw new Error('Thumbnail canvas must preserve its drawing buffer');
-    const renderer = new ModelRenderer(model);
+        const renderer = new ModelRenderer(model);
     const maxTextureSize = options.maxTextureSize ?? 512;
     const cacheKey = (path: string): string => JSON.stringify([options.textureNamespace || '', path,
         model.Textures.find(texture => texture.Image === path)?.Flags || 0, maxTextureSize]);
@@ -206,6 +206,7 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
         renderer.setEnvironmentMapProcessingEnabled(options.useEnvironmentMap ?? false);
         renderer.setEnvironmentMapNamespace(options.textureNamespace || '');
         renderer.setTextureSizeLimit(maxTextureSize);
+        renderer.setCaptureAlphaEnabled((options.background?.[3] ?? 0) === 0);
         renderer.initGL(gl);
         model.Textures.forEach(texture => {
             const key = cacheKey(texture.Image);
@@ -226,20 +227,48 @@ async function captureThumbnail (model: Model, options: ThumbnailOptions, cache?
         let offset = options.frameOffsetMs ?? 1;
         renderer.setPose(sequence, offset);
         const interval = model.Sequences[sequence]?.Interval || [0, 0];
+        const duration = interval[1] - interval[0];
+        const automaticEffects = options.warmupMs === undefined && options.findVisibleFrame !== false &&
+            (model.ParticleEmitters2.length > 0 || model.RibbonEmitters.length > 0);
+        let effectWarmup = automaticEffects ? Math.min(500, Math.max(100, duration * 0.25)) : warmupMs;
+        if (automaticEffects) {
+            // A brief squirt can already be dead at 25% of a long Birth animation.
+            // Capture shortly after its first nonzero emission key instead.
+            for (const emitter of model.ParticleEmitters2) {
+                const emission = emitter.EmissionRate;
+                if (!emitter.Squirt || typeof emission === 'number' || !emission) continue;
+                const start = emission.GlobalSeqId !== null && emission.GlobalSeqId !== undefined ? 0 : interval[0];
+                const key = emission.Frames.findIndex((frame, index) => frame >= start + offset &&
+                    frame <= start + duration && emission.Values[index] > 0);
+                if (key < 0) continue;
+                const afterBurst = Math.max(16, Math.min(100, emitter.LifeSpan * 250));
+                effectWarmup = Math.min(effectWarmup, emission.Frames[key] - start - offset + afterBurst);
+            }
+        }
         let bounds = renderer.getVisibleBounds({levelOfDetail});
-        if (!bounds && !warmupMs && options.findVisibleFrame !== false) {
+        if (!bounds && !effectWarmup && options.findVisibleFrame !== false) {
             for (let step = 1; step <= 16 && !bounds; ++step) {
                 offset = (interval[1] - interval[0]) * step / 16;
                 renderer.setPose(sequence, offset);
                 bounds = renderer.getVisibleBounds({levelOfDetail});
             }
         }
-        for (let remaining = warmupMs; remaining > 0;) {
-            const delta = Math.min(remaining, 1000 / 60);
-            renderer.update(delta);
-            remaining -= delta;
-        }
+        const simulate = (milliseconds: number): void => {
+            for (let remaining = milliseconds; remaining > 0;) {
+                if (options.signal?.aborted) throw abortError();
+                const delta = Math.min(remaining, 1000 / 60);
+                renderer.update(delta);
+                remaining -= delta;
+            }
+        };
+        simulate(effectWarmup);
         bounds = renderer.getVisibleBounds({levelOfDetail});
+        // One bounded retry catches emitters enabled later in the chosen animation.
+        if (!bounds && automaticEffects) {
+            renderer.setPose(sequence, Math.min(duration * 0.5, 1000));
+            simulate(250);
+            bounds = renderer.getVisibleBounds({levelOfDetail});
+        }
         if (!bounds) throw new Error('The selected pose has no visible geometry; try warmupMs for particle-only models');
         // Billboards change bounds when the camera changes. Refit their evaluated pose as well.
         let camera = fitThumbnailCamera(bounds, width, height, options.cameraDirection, options.padding);

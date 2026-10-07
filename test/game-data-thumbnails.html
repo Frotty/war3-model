@@ -35,8 +35,7 @@ window.captureGameModel = async ({path, size, minCoverage, minSpan}) => {
         for (const offset of new Set([1, (interval[1] - interval[0]) * 0.2, (interval[1] - interval[0]) * 0.5])) {
             try {
                 const result = await session.render(model, {width: size, height: size, sequence, frameOffsetMs: offset,
-                    textureNamespace, maxTextureSize: 256, loadTexture, allowMissingTextures: true,
-                    warmupMs: model.ParticleEmitters2.length || model.RibbonEmitters.length ? 500 : 0});
+                    textureNamespace, maxTextureSize: 256, loadTexture, allowMissingTextures: true});
                 const image = await createImageBitmap(result.blob);
                 const canvas = new OffscreenCanvas(size, size);
                 const context = canvas.getContext('2d');

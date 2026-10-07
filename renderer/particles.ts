@@ -1074,12 +1074,16 @@ export class ParticlesController {
         } else if (emitter.props.FilterMode === ParticleEmitter2FilterMode.Additive) {
             this.gl.enable(this.gl.BLEND);
             this.gl.enable(this.gl.DEPTH_TEST);
-            this.gl.blendFuncSeparate(this.gl.SRC_ALPHA, this.gl.ONE, this.gl.ZERO, this.gl.ONE);
+            this.gl.blendFuncSeparate(this.gl.SRC_ALPHA, this.gl.ONE,
+                this.rendererData.captureAlpha ? this.gl.ONE : this.gl.ZERO,
+                this.rendererData.captureAlpha ? this.gl.ONE_MINUS_SRC_ALPHA : this.gl.ONE);
             this.gl.depthMask(false);
         } else if (emitter.props.FilterMode === ParticleEmitter2FilterMode.AlphaKey) {
             this.gl.enable(this.gl.BLEND);
             this.gl.enable(this.gl.DEPTH_TEST);
-            this.gl.blendFuncSeparate(this.gl.SRC_ALPHA, this.gl.ONE, this.gl.ZERO, this.gl.ONE);
+            this.gl.blendFuncSeparate(this.gl.SRC_ALPHA, this.gl.ONE,
+                this.rendererData.captureAlpha ? this.gl.ONE : this.gl.ZERO,
+                this.rendererData.captureAlpha ? this.gl.ONE_MINUS_SRC_ALPHA : this.gl.ONE);
             this.gl.depthMask(false);
         } else if (emitter.props.FilterMode === ParticleEmitter2FilterMode.Modulate) {
             this.gl.enable(this.gl.BLEND);
