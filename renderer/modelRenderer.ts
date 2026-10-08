@@ -5160,7 +5160,9 @@ export class ModelRenderer {
                 loadedTextureCount: Object.keys(this.rendererData.textures).length,
             });
         }
-        this.gl.bindTexture(this.gl.TEXTURE_2D, glDiffuseTexture || this.rendererData.whiteTexture);
+        const fallback = diffuseTexture?.Image && (baseLayer.FilterMode === FilterMode.Additive || baseLayer.FilterMode === FilterMode.AddAlpha) ?
+            this.rendererData.transparentTexture : this.rendererData.whiteTexture;
+        this.gl.bindTexture(this.gl.TEXTURE_2D, glDiffuseTexture || fallback);
         this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
 
 
