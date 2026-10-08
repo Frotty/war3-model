@@ -281,6 +281,15 @@ try {
  const initialCapture=await renderModelThumbnail(lateMesh,options);
  check(initialCapture.frame===1&&(await rgba(initialCapture)).some((value,index)=>index%4===3&&value>100),
   'Empty hidden effects preserve a mesh visible only at the requested initial pose');
+ const missingEffectOptions={...options,warmupMs:500,allowMissingTextures:true,
+  loadTexture:async()=>{throw new Error('Unavailable effect texture');}};
+ for(const [effect,name] of [[particleModel,'particle'],[ribbonModel,'ribbon'],[additiveModel,'mesh']]) {
+  const missingEffect=await renderModelThumbnail(effect,missingEffectOptions);
+  const pixels=await rgba(missingEffect);
+  check(missingEffect.missingTextures.length===1&&pixels.every((value,index)=>index%4!==3||value===0),
+   `Missing additive ${name} textures contribute no filled squares to PNG`);
+ }
+ particle.FilterMode=0;
  const fallbackParticle=await renderModelThumbnail(particleModel,{...options,warmupMs:500,allowMissingTextures:true,
   loadTexture:async()=>{throw new Error('Unavailable effect texture');}});
  const particlePixels=await rgba(fallbackParticle);
