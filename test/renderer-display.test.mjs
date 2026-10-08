@@ -103,7 +103,8 @@ for (let flags = 0; flags < 8; ++flags) {
     const renderer = new ModelRenderer(model);
     renderer.update(0);
     assert.equal(renderer.lighting.count, 1);
-    assert.ok(Math.abs(renderer.lighting.colors[0] - 0.4) < 1e-6, 'light color converts BGR and scales intensity');
+    assert.ok(Math.abs(renderer.lighting.colors[2] - 0.4) < 1e-6, 'RGB blue light scales intensity without swapping channels');
+    assert.equal(renderer.lighting.colors[0], 0);
     assert.deepEqual([...renderer.lighting.positions.slice(0,4)], [1,2,3,1]);
     assert.ok(Math.abs(renderer.lighting.ambient[1] - 1) < 1e-6, 'model ambient contributes to bright defaults');
     light.Visibility = 0;

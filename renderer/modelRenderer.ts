@@ -4827,8 +4827,8 @@ export class ModelRenderer {
         }
         const color = anim.Color instanceof Float32Array ? anim.Color : this.interp.vec3(tempVec3, anim.Color);
         if (color) {
-            // Model colors use BGR order; shaders expect RGB.
-            vec3.set(out, color[2], color[1], color[0]);
+            // Parsers normalize MDL's BGR and MDX's RGB to RGB in the model graph.
+            vec3.copy(out, color);
         }
     }
 

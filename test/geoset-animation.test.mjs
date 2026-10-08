@@ -36,16 +36,33 @@ function fixture(hd = false) {
     return model;
 }
 
+// Hand-authored MDX GEOA bytes assert the wire/API RGB contract independently of generators.
+{
+    const bytes = new ArrayBuffer(40);
+    const view = new DataView(bytes);
+    const ascii = (offset, text) => [...text].forEach((char, i) => view.setUint8(offset + i, char.charCodeAt(0)));
+    ascii(0, 'MDLX'); ascii(4, 'GEOA');
+    view.setUint32(8, 28, true); view.setUint32(12, 28, true);
+    view.setFloat32(16, 1, true); view.setUint32(20, 2, true);
+    view.setFloat32(24, 1, true); // RGB red, not MDL BGR blue.
+    view.setUint32(36, 2, true); // Sparse GeosetId: this is the third geoset.
+    const original = fixture();
+    original.GeosetAnims = parseMDX(bytes).GeosetAnims;
+    const renderer = new ModelRenderer(original);
+    assert.deepEqual([...renderer.rendererData.geosetColor[0]], [1, 1, 1]);
+    assert.deepEqual([...renderer.rendererData.geosetColor[2]], [1, 0, 0]);
+}
+
 for (const roundTrip of [false, true]) {
     const original = fixture();
     assert.equal(original.GeosetAnims[0].Flags & 2, 2, 'MDL enables animated color');
     assert.equal(original.GeosetAnims[1].Flags & 2, 2, 'MDL enables static color');
     const model = roundTrip ? parseMDX(generateMDX(original)) : original;
     const renderer = new ModelRenderer(model);
-    assert.deepEqual([...renderer.rendererData.geosetColor[0]], [1, 0, 0]);
+    assert.deepEqual([...renderer.rendererData.geosetColor[0]], [0, 0, 1]);
     renderer.update(250);
     assert.equal(renderer.rendererData.geosetAlpha[0], 0.75);
-    assert.deepEqual([...renderer.rendererData.geosetColor[0]], [0.75, 0, 0.25]);
+    assert.deepEqual([...renderer.rendererData.geosetColor[0]], [0.25, 0, 0.75]);
     assert.deepEqual([...renderer.rendererData.geosetColor[1]], [0, 1, 0]);
     assert.deepEqual([...renderer.rendererData.geosetColor[2]], [1, 1, 1]);
     assert.equal(renderer.rendererData.geosetAlpha[2], 1);
@@ -69,7 +86,7 @@ for (const stepped of [false, true]) {
     renderer.setSequence(1);
     renderer.update(250);
     assert.equal(renderer.rendererData.geosetAlpha[0], stepped ? 1 : 0.75);
-    assert.deepEqual([...renderer.rendererData.geosetColor[0]], stepped ? [1, 0, 0] : [0.75, 0, 0.25]);
+    assert.deepEqual([...renderer.rendererData.geosetColor[0]], stepped ? [0, 0, 1] : [0.25, 0, 0.75]);
 }
 
 // Capture actual draw-time uniforms: interpolation alone did not detect the original bug.
@@ -93,7 +110,7 @@ for (const hd of [false, true]) {
     renderer.update(250);
     renderer.render(mat4.create(), mat4.create(), {});
     assert.deepEqual(draws, [
-        {color: [0.75, 0, 0.25, 0.75], layerAlpha: 0.5},
+        {color: [0.25, 0, 0.75, 0.75], layerAlpha: 0.5},
         {color: [0, 1, 0, 0.75], layerAlpha: 0.5},
         {color: [1, 1, 1, 1], layerAlpha: 0.5},
     ], `${hd ? 'HD' : 'SD'} draws receive independent geoset tint and alpha`);
