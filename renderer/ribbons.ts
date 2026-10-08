@@ -436,7 +436,7 @@ export class RibbonsController {
                 const layerAlpha = this.interp.animVectorVal(material.Layers[j].Alpha, 1);
                 if (layerAlpha < 1e-6) continue;
                 this.gl.uniform4f(this.shaderProgramLocations.colorUniform,
-                    color[2] * layerAlpha, color[1] * layerAlpha, color[0] * layerAlpha,
+                    color[0] * layerAlpha, color[1] * layerAlpha, color[2] * layerAlpha,
                     this.interp.animVectorVal(emitter.props.Alpha, 1) * layerAlpha);
                 this.setLayerProps(material.Layers[j], this.rendererData.materialLayerTextureID[materialID][j]);
                 this.renderEmitter(emitter);
@@ -501,7 +501,7 @@ export class RibbonsController {
                 fsUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
                 fsUniformsViews.discardAlphaLevel.set([layer.FilterMode === FilterMode.Transparent ? .75 : 0]);
                 const color = emitter.props.Color || new Float32Array([1, 1, 1]);
-                fsUniformsViews.color.set([color[2] * layerAlpha, color[1] * layerAlpha, color[0] * layerAlpha,
+                fsUniformsViews.color.set([color[0] * layerAlpha, color[1] * layerAlpha, color[2] * layerAlpha,
                     this.interp.animVectorVal(emitter.props.Alpha, 1) * layerAlpha]);
                 const texAnim = textureAnimationMatrix(this.interp, this.rendererData.model, layer);
                 for (let row = 0; row < 3; ++row) fsUniformsViews.tVertexAnim.set(texAnim.slice(row * 3, row * 3 + 3), row * 4);

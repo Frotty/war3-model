@@ -29,6 +29,14 @@ async function rgba(result) {const img=await show(result,'synthetic'); const can
 try {
  const model=parseMDL(source);
  const options={width:128,height:96,loadTexture:async()=>white,cameraDirection:[0,0,1]};
+ for(const [mdlColor,expected] of [['1, 0, 0',[0,0,255]],['0, 1, 1',[255,255,0]]]) {
+  const tintModel=parseMDL(source+` GeosetAnim { static Alpha 1, static Color { ${mdlColor} }, GeosetId 0, }`);
+  tintModel.Materials[0].Layers[0].Shading=1;
+  const pixels=await rgba(await renderModelThumbnail(tintModel,options));
+  const center=(48*128+64)*4;
+  check(expected.every((value,index)=>Math.abs(pixels[center+index]-value)<2),
+   `MDL BGR ${mdlColor} reaches framebuffer as RGB ${expected.join(',')}`);
+ }
  const hdModel=parseMDL(source);hdModel.Version=1800;
  hdModel.Materials[0].Layers[0].ShaderTypeId=1;
  hdModel.Nodes.push({ObjectId:1,Flags:0,PivotPoint:new Float32Array(3),
@@ -138,7 +146,7 @@ try {
  priorityModel.Materials[0].Layers[0].Shading=209;
  priorityModel.Materials.push({PriorityPlane:-5,Layers:[{...priorityModel.Materials[0].Layers[0],FilterMode:1}]});
  priorityModel.Geosets.push({...priorityModel.Geosets[0],MaterialID:1});
- priorityModel.GeosetAnims=[{GeosetId:0,Flags:2,Alpha:1,Color:new Float32Array([0,0,1])},
+ priorityModel.GeosetAnims=[{GeosetId:0,Flags:2,Alpha:1,Color:new Float32Array([1,0,0])},
   {GeosetId:1,Flags:2,Alpha:1,Color:new Float32Array([0,1,0])}];
  const priorityCapture=await renderModelThumbnail(priorityModel,options);const priorityPixels=await rgba(priorityCapture);
  const priorityCenter=(48*128+64)*4;

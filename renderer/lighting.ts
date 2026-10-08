@@ -28,7 +28,7 @@ export function evaluateLighting (out: LightingData, data: RendererData, interp:
         if (visibility <= 0) continue;
         const ambientColor = light.AmbColor instanceof Float32Array ? light.AmbColor : interp.vec3(tempAmbient, light.AmbColor);
         const ambientIntensity = interp.animVectorVal(light.AmbIntensity, 0) * diffuse * visibility;
-        if (ambientColor) for (let j = 0; j < 3; ++j) out.ambient[j] += ambientColor[2 - j] * ambientIntensity;
+        if (ambientColor) for (let j = 0; j < 3; ++j) out.ambient[j] += ambientColor[j] * ambientIntensity;
         if (light.LightType === LightType.Ambient || out.count >= MAX_MODEL_LIGHTS) continue;
         const color = light.Color instanceof Float32Array ? light.Color : interp.vec3(tempColor, light.Color);
         const intensity = interp.animVectorVal(light.Intensity, 1) * diffuse * visibility;
@@ -44,7 +44,7 @@ export function evaluateLighting (out: LightingData, data: RendererData, interp:
             vec3.normalize(tempPosition, tempPosition);
             out.positions.set(tempPosition, offset);
         }
-        for (let j = 0; j < 3; ++j) out.colors[offset + j] = color[2 - j] * intensity;
+        for (let j = 0; j < 3; ++j) out.colors[offset + j] = color[j] * intensity;
         out.attenuation[offset] = interp.animVectorVal(light.AttenuationStart, 0);
         out.attenuation[offset + 1] = interp.animVectorVal(light.AttenuationEnd, 1e10);
     }
