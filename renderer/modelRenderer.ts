@@ -584,6 +584,7 @@ export class ModelRenderer {
             shadowSmoothingStep: 0,
             textures: {},
             whiteTexture: null,
+            transparentTexture: null,
             gpuTextures: {},
             gpuSamplers: [],
             gpuDepthSampler: null,
@@ -870,6 +871,8 @@ export class ModelRenderer {
             // ModelRenderer.releaseSharedResources(gl).
             this.gl.deleteTexture(this.rendererData.whiteTexture);
             this.rendererData.whiteTexture = null;
+            this.gl.deleteTexture(this.rendererData.transparentTexture);
+            this.rendererData.transparentTexture = null;
             this.gl.deleteTexture(this.flatNormalTexture);
             this.gl.deleteTexture(this.defaultOrmTexture);
 
@@ -948,6 +951,8 @@ export class ModelRenderer {
         };
 
         this.rendererData.whiteTexture = make(255, 255, 255, 255);
+        // Missing additive sprites must contribute no light, rather than a solid white quad.
+        this.rendererData.transparentTexture = make(0, 0, 0, 0);
         // Flat tangent-space normal (0, 0, 1).
         this.flatNormalTexture = make(128, 128, 255, 255);
         // The HD shader reads ORM as occlusion.r / roughness.g / metallic.b / teamColorFactor.a,
@@ -5080,7 +5085,9 @@ export class ModelRenderer {
         this.applyLayerState(layer);
 
         this.gl.activeTexture(this.gl.TEXTURE0);
-        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image] || this.rendererData.whiteTexture);
+        const fallback = texture.Image && (layer.FilterMode === FilterMode.Additive || layer.FilterMode === FilterMode.AddAlpha) ?
+            this.rendererData.transparentTexture : this.rendererData.whiteTexture;
+        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image] || fallback);
         this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
         this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, 0);
 
@@ -5153,7 +5160,9 @@ export class ModelRenderer {
                 loadedTextureCount: Object.keys(this.rendererData.textures).length,
             });
         }
-        this.gl.bindTexture(this.gl.TEXTURE_2D, glDiffuseTexture || this.rendererData.whiteTexture);
+        const fallback = diffuseTexture?.Image && (baseLayer.FilterMode === FilterMode.Additive || baseLayer.FilterMode === FilterMode.AddAlpha) ?
+            this.rendererData.transparentTexture : this.rendererData.whiteTexture;
+        this.gl.bindTexture(this.gl.TEXTURE_2D, glDiffuseTexture || fallback);
         this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
 
 

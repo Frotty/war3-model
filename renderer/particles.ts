@@ -1104,7 +1104,10 @@ export class ParticlesController {
 
         const texture = this.rendererData.model.Textures[emitter.props.TextureID];
         this.gl.activeTexture(this.gl.TEXTURE0);
-        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image] || this.rendererData.whiteTexture);
+        const fallback = texture.Image && (emitter.props.FilterMode === ParticleEmitter2FilterMode.Additive ||
+            emitter.props.FilterMode === ParticleEmitter2FilterMode.AlphaKey) ?
+            this.rendererData.transparentTexture : this.rendererData.whiteTexture;
+        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image] || fallback);
         this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
         this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, 0);
         if (texture.Image) {

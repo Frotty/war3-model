@@ -281,6 +281,28 @@ try {
  const initialCapture=await renderModelThumbnail(lateMesh,options);
  check(initialCapture.frame===1&&(await rgba(initialCapture)).some((value,index)=>index%4===3&&value>100),
   'Empty hidden effects preserve a mesh visible only at the requested initial pose');
+ const missingEffectOptions={...options,warmupMs:500,allowMissingTextures:true,
+  loadTexture:async()=>{throw new Error('Unavailable effect texture');}};
+ const missingHDModel=parseMDL(source);missingHDModel.Version=1000;
+ missingHDModel.Geosets[0].SkinWeights=new Uint8Array([0,0,0,0,255,0,0,0,0,0,0,0,255,0,0,0,0,0,0,0,255,0,0,0]);
+ missingHDModel.Geosets[0].Tangents=new Float32Array([1,0,0,1,1,0,0,1,1,0,0,1]);
+ for(const filterMode of [3,4]) {
+  missingHDModel.Materials[0].Layers[0].FilterMode=filterMode;
+  const missingHD=await renderModelThumbnail(missingHDModel,missingEffectOptions);
+  check(missingHD.missingTextures.length===1&&(await rgba(missingHD)).every((value,index)=>index%4!==3||value===0),
+   `Missing HD additive diffuse texture contributes no filled geometry (filter=${filterMode})`);
+ }
+ missingHDModel.Materials[0].Layers[0].FilterMode=0;
+ const opaqueHD=await renderModelThumbnail(missingHDModel,missingEffectOptions);
+ check((await rgba(opaqueHD)).some((value,index)=>index%4===3&&value>200),
+  'Missing opaque HD diffuse textures retain the visible white fallback');
+ for(const [effect,name] of [[particleModel,'particle'],[ribbonModel,'ribbon'],[additiveModel,'mesh']]) {
+  const missingEffect=await renderModelThumbnail(effect,missingEffectOptions);
+  const pixels=await rgba(missingEffect);
+  check(missingEffect.missingTextures.length===1&&pixels.every((value,index)=>index%4!==3||value===0),
+   `Missing additive ${name} textures contribute no filled squares to PNG`);
+ }
+ particle.FilterMode=0;
  const fallbackParticle=await renderModelThumbnail(particleModel,{...options,warmupMs:500,allowMissingTextures:true,
   loadTexture:async()=>{throw new Error('Unavailable effect texture');}});
  const particlePixels=await rgba(fallbackParticle);

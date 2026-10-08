@@ -762,7 +762,9 @@ export class RibbonsController {
         }
 
         this.gl.activeTexture(this.gl.TEXTURE0);
-        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image] || this.rendererData.whiteTexture);
+        const fallback = texture.Image && (layer.FilterMode === FilterMode.Additive || layer.FilterMode === FilterMode.AddAlpha) ?
+            this.rendererData.transparentTexture : this.rendererData.whiteTexture;
+        this.gl.bindTexture(this.gl.TEXTURE_2D, this.rendererData.textures[texture.Image] || fallback);
         this.gl.uniform1i(this.shaderProgramLocations.samplerUniform, 0);
         this.gl.uniform1f(this.shaderProgramLocations.replaceableTypeUniform, 0);
         if (texture.Image) {
