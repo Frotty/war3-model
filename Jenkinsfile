@@ -15,6 +15,7 @@ pipeline {
                     set -eu
                     rm -f eslint-results.sarif
                     git config --global --add safe.directory "$WORKSPACE"
+                    git clean -fdx -q
                     npm ci
                     npm install --no-save --package-lock=false @microsoft/eslint-formatter-sarif@2.1.7
                 '''
