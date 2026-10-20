@@ -1,5 +1,10 @@
 pipeline {
-    agent { dockerfile { filename 'ci/Dockerfile'; args '-u root --entrypoint=""' } }
+    agent {
+        dockerfile {
+            filename 'ci/Dockerfile'
+            args '-u root --entrypoint=""'
+        }
+    }
     options {
         timestamps()
         timeout(time: 30, unit: 'MINUTES')
@@ -42,7 +47,12 @@ pipeline {
             }
         }
         stage('Upload code scanning results') {
-            when { allOf { not { changeRequest() }; branch 'master' } }
+            when {
+                allOf {
+                    not { changeRequest() }
+                    branch 'master'
+                }
+            }
             steps {
                 withCredentials([usernamePassword(credentialsId: 'token',
                         usernameVariable: 'GITHUB_ACTOR', passwordVariable: 'GITHUB_TOKEN')]) {
