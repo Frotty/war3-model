@@ -8,7 +8,7 @@ pipeline {
     options {
         timestamps()
         timeout(time: 30, unit: 'MINUTES')
-        disableConcurrentBuilds()
+        disableConcurrentBuilds(abortPrevious: env.CHANGE_ID != null)
         buildDiscarder(logRotator(numToKeepStr: '30', artifactDaysToKeepStr: '14'))
     }
     triggers { cron(env.BRANCH_NAME == 'master' ? '20 21 * * 5' : '') }
